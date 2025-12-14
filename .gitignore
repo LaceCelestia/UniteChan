@@ -1,0 +1,47 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# Virtual environment
+.venv/
+venv/
+
+# =========================
+# Environment / Secrets
+# =========================
+.env
+
+# =========================
+# Runtime data (DO NOT COMMIT)
+# =========================
+data/config_state.json
+data/lobby_state.json
+
+# ログ（将来用）
+logs/
+
+# =========================
+# Editor / OS
+# =========================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# =========================
+# Build / packaging
+# =========================
+dist/
+build/
+*.egg-info/
+
+# =========================
+# Test / cache
+# =========================
+.pytest_cache/
+.mypy_cache/
