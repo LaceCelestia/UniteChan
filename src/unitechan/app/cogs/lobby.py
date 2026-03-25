@@ -1,5 +1,3 @@
-from typing import Dict, Set
-
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -14,20 +12,31 @@ class Lobby(commands.Cog):
         self.bot = bot
         self.store = LobbyStore()
 
+    # ---- ヘルパー ----
+
+    async def _require_admin(self, interaction: discord.Interaction) -> bool:
+        """管理者権限チェック。権限不足なら ephemeral エラーを送り False を返す。"""
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
+            return False
+        perms = interaction.user.guild_permissions
+        if not (perms.administrator or perms.manage_guild or perms.manage_roles):
+            await interaction.response.send_message(
+                'このコマンドは管理者のみ使用できます。', ephemeral=True,
+            )
+            return False
+        return True
+
     # ---- コマンド ----
 
     @app_commands.command(name='join', description='ユナイト用ロビーに参加します')
     async def join(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
-            await interaction.response.send_message(
-                'サーバー内で使ってね。', ephemeral=True,
-            )
+            await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
             return
 
         if interaction.user.bot:
-            await interaction.response.send_message(
-                'Bot はロビーに参加できないよ。', ephemeral=True,
-            )
+            await interaction.response.send_message('Bot はロビーに参加できないよ。', ephemeral=True)
             return
 
         guild_id = interaction.guild.id
@@ -41,7 +50,6 @@ class Lobby(commands.Cog):
             return
 
         size = self.store.join(guild_id, interaction.user.id)
-
         await interaction.response.send_message(
             f'ロビーに参加しました！\n現在人数: **{size}人**',
             ephemeral=True,
@@ -50,22 +58,17 @@ class Lobby(commands.Cog):
     @app_commands.command(name='leave', description='ロビーから抜けます')
     async def leave(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
-            await interaction.response.send_message(
-                'サーバー内で使ってね。', ephemeral=True,
-            )
+            await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
             return
 
         guild_id = interaction.guild.id
         lobby = self.store.get_lobby(guild_id)
 
         if interaction.user.id not in lobby:
-            await interaction.response.send_message(
-                'ロビーに参加していません。', ephemeral=True,
-            )
+            await interaction.response.send_message('ロビーに参加していません。', ephemeral=True)
             return
 
         size = self.store.leave(guild_id, interaction.user.id)
-
         await interaction.response.send_message(
             f'ロビーから抜けました。\n現在人数: **{size}人**',
             ephemeral=True,
@@ -89,14 +92,10 @@ class Lobby(commands.Cog):
         rank: app_commands.Choice[str],
     ) -> None:
         if interaction.guild is None:
-            await interaction.response.send_message(
-                'サーバー内で使ってね。', ephemeral=True,
-            )
+            await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
             return
 
-        guild_id = interaction.guild.id
-        self.store.set_rank(guild_id, interaction.user.id, rank.value)
-
+        self.store.set_rank(interaction.guild.id, interaction.user.id, rank.value)
         await interaction.response.send_message(
             f'ランクを **{rank.name}** に設定しました。',
             ephemeral=True,
@@ -108,34 +107,12 @@ class Lobby(commands.Cog):
         interaction: discord.Interaction,
         member: discord.Member,
     ) -> None:
-        if interaction.guild is None:
-            await interaction.response.send_message(
-                'サーバー内で使ってね。', ephemeral=True,
-            )
+        if not await self._require_admin(interaction):
             return
 
-        if not isinstance(interaction.user, discord.Member):
-            await interaction.response.send_message(
-                'サーバー内で使ってね。', ephemeral=True,
-            )
-            return
-
-        perms = interaction.user.guild_permissions
-        if not (perms.administrator or perms.manage_guild or perms.manage_roles):
-            await interaction.response.send_message(
-                'このコマンドは管理者のみ使用できます。',
-                ephemeral=True,
-            )
-            return
-
-        guild_id = interaction.guild.id
-        ok = self.store.kick(guild_id, member.id)
-
+        ok = self.store.kick(interaction.guild.id, member.id)  # type: ignore[union-attr]
         if not ok:
-            await interaction.response.send_message(
-                'そのメンバーはロビーにいません。',
-                ephemeral=True,
-            )
+            await interaction.response.send_message('そのメンバーはロビーにいません。', ephemeral=True)
             return
 
         await interaction.response.send_message(
@@ -146,78 +123,65 @@ class Lobby(commands.Cog):
     @app_commands.command(name='lobby', description='現在のロビーメンバーを表示します')
     async def lobby(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
-            await interaction.response.send_message(
-                'サーバー内で使ってね。', ephemeral=True,
-            )
+            await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
             return
 
-        guild_id = interaction.guild.id
-        lobby, ranks = self.store.snapshot(guild_id)
+        lobby, ranks = self.store.snapshot(interaction.guild.id)
 
         if not lobby:
+            await interaction.response.send_message('ロビーには誰もいません。', ephemeral=True)
+            return
+
+        lines = '\n'.join(
+            f'- <@{uid}> ({ranks[uid]})' if uid in ranks else f'- <@{uid}>'
+            for uid in lobby
+        )
+        await interaction.response.send_message(
+            f'**現在のロビー（{len(lobby)}人）**\n{lines}',
+            ephemeral=True,
+        )
+
+    @app_commands.command(name='lobby_collect', description='今いるVCのメンバーをロビーに一括登録します（管理者専用）')
+    async def lobby_collect(self, interaction: discord.Interaction) -> None:
+        if not await self._require_admin(interaction):
+            return
+
+        user = interaction.user
+        assert isinstance(user, discord.Member)
+        vc = user.voice and user.voice.channel
+        if vc is None:
+            await interaction.response.send_message('あなたがVCに参加していません。', ephemeral=True)
+            return
+
+        members = [m for m in vc.members if not m.bot]
+        if not members:
             await interaction.response.send_message(
-                'ロビーには誰もいません。', ephemeral=True,
+                f'**{vc.name}** にBotでないメンバーがいません。', ephemeral=True,
             )
             return
 
-        members = []
-        for uid in lobby:
-            mention = f'<@{uid}>'
-            rank_str = ranks.get(uid)
-            if rank_str:
-                members.append(f'- {mention} ({rank_str})')
-            else:
-                members.append(f'- {mention}')
+        self.store.set_members(interaction.guild.id, {m.id for m in members})  # type: ignore[union-attr]
 
-        lines = '\n'.join(members)
-
+        lines = '\n'.join(f'- {m.display_name}' for m in members)
         await interaction.response.send_message(
-            f'**現在のロビー（{len(members)}人）**\n{lines}',
-            ephemeral=True,
+            f'**{vc.name}** のメンバー {len(members)}人 をロビーに登録しました。\n{lines}',
         )
 
     @app_commands.command(name='lobby_clear', description='ロビーを全員解散します（管理者専用）')
     async def lobby_clear(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            await interaction.response.send_message(
-                'サーバー内で使ってね。', ephemeral=True,
-            )
+        if not await self._require_admin(interaction):
             return
 
-        if not isinstance(interaction.user, discord.Member):
-            await interaction.response.send_message(
-                'サーバー内で使ってね。', ephemeral=True,
-            )
-            return
-
-        perms = interaction.user.guild_permissions
-        if not (perms.administrator or perms.manage_guild or perms.manage_roles):
-            await interaction.response.send_message(
-                'このコマンドは管理者のみ使用できます。',
-                ephemeral=True,
-            )
-            return
-
-        guild_id = interaction.guild.id
+        guild_id = interaction.guild.id  # type: ignore[union-attr]
         lobby, _ = self.store.snapshot(guild_id)
 
         if not lobby:
-            await interaction.response.send_message(
-                'ロビーには誰もいません。',
-                ephemeral=True,
-            )
+            await interaction.response.send_message('ロビーには誰もいません。', ephemeral=True)
             return
 
-        # leave() を使って全員抜けさせる（永続化も中でやる）
-        count = 0
-        for uid in list(lobby):
-            self.store.leave(guild_id, uid)
-            count += 1
-
-        await interaction.response.send_message(
-            f'ロビーを解散しました。（{count}人）',
-            ephemeral=True,
-        )
+        count = len(lobby)
+        self.store.set_members(guild_id, set())
+        await interaction.response.send_message(f'ロビーを解散しました。（{count}人）', ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

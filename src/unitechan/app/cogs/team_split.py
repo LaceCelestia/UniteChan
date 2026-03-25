@@ -120,6 +120,13 @@ class TeamSplit(commands.Cog):
                 inline=True,
             )
 
+        if cfg.banned_pokemon:
+            embed.add_field(
+                name='🚫 バン中のポケモン',
+                value=' / '.join(sorted(cfg.banned_pokemon)),
+                inline=False,
+            )
+
         if interaction.response.is_done():
             await interaction.followup.send(embed=embed)
         else:

@@ -19,8 +19,7 @@ def create_bot() -> commands.Bot:
 
     @bot.event
     async def on_ready() -> None:
-        print(f'Logged in as {bot.user} (ID: {bot.user.id})')
-        logger.info(f'Logged in as {bot.user}')
+        logger.info(f'Logged in as {bot.user} (ID: {bot.user.id})')
 
     @bot.tree.command(name='sync', description='このサーバーのスラッシュコマンドを再同期します(管理者専用)')
     @app_commands.checks.has_permissions(administrator=True)
@@ -46,6 +45,11 @@ def create_bot() -> commands.Bot:
             await bot.load_extension('unitechan.app.cogs.config_commands')
         except Exception as exc:
             logger.exception('failed to load config_commands: %s', exc)
+        # /ban 系
+        try:
+            await bot.load_extension('unitechan.app.cogs.ban_commands')
+        except Exception as exc:
+            logger.exception('failed to load ban_commands: %s', exc)
 
     async def setup_hook() -> None:  # type: ignore[override]
         await load_cogs()
@@ -62,11 +66,7 @@ def main() -> None:
         format='[%(asctime)s] [%(levelname)s] %(name)s: %(message)s',
     )
 
-    print('DEBUG: bot starting...')
-
     token = os.getenv('DISCORD_TOKEN')
-    print('DEBUG: token exists?', token is not None)
-
     if not token:
         raise RuntimeError('環境変数 DISCORD_TOKEN がありません (.env に書く)')
 

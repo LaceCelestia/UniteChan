@@ -5,6 +5,8 @@ from typing import Dict, List, Optional
 from pathlib import Path
 import random
 
+import yaml
+
 from .lobby_store import LobbyStore
 from .split_mode import SplitMode
 from .config_store import get_store
@@ -82,6 +84,8 @@ class SplitService:
         self._pokemon_by_role = self._load_pokemon_list()
         # guild_id -> user_id -> [roles...]
         self._role_history: Dict[int, Dict[int, List[str]]] = {}
+        # guild_id -> user_id -> 直前の試合でのチームindex
+        self._prev_teams: Dict[int, Dict[int, int]] = {}
 
     # =======================================================
     # 外部用API（/split run）
@@ -97,7 +101,13 @@ class SplitService:
         ]
 
         cfg = get_store().get_split_config(guild_id)
-        return self.split_custom(guild_id, players, mode, cfg, team_count)
+        result = self.split_custom(guild_id, players, mode, cfg, team_count)
+        self._prev_teams[guild_id] = {
+            mem.user_id: tidx
+            for tidx, team in enumerate(result.teams)
+            for mem in team.members
+        }
+        return result
 
     # =======================================================
     # /split test 用
@@ -149,26 +159,32 @@ class SplitService:
             for i in range(team_count)
         ]
 
-        # 目標人数を超えないように、なるべく総ランクが揃うように割当
+        # 前回チーム履歴（なければ空）
+        prev_teams = self._prev_teams.get(guild_id, {})
+
         for p in base:
-            # まだ枠が残っているチームだけ候補にする
             candidates = [
                 i for i in range(team_count)
                 if len(teams_simple[i]) < target_sizes[i]
             ]
 
-            # (現在の総ランク値, 人数, チームindex) を比較して、
-            # 最小スコアの候補が複数あればランダムに選ぶ
-            scored = [
-                (weights[i], len(teams_simple[i]), i)
-                for i in candidates
-            ]
-            min_weight = min(w for w, _, _ in scored)
-            min_size = min(s for w, s, _ in scored if w == min_weight)
-            best_indices = [
-                i for (w, s, i) in scored
-                if w == min_weight and s == min_size
-            ]
+            # スコア: (前回同チーム人数, 総ランク値, 人数)
+            # → 前回同じチームだった人が少ないほど優先、次にランクバランス
+            p_prev = prev_teams.get(p.user_id)
+            scored = []
+            for i in candidates:
+                same_prev = (
+                    sum(1 for pm in teams_simple[i] if prev_teams.get(pm.user_id) == p_prev)
+                    if p_prev is not None else 0
+                )
+                scored.append((same_prev, weights[i], len(teams_simple[i]), i))
+
+            min_same = min(s for s, *_ in scored)
+            after_same = [(w, sz, i) for s, w, sz, i in scored if s == min_same]
+            min_weight = min(w for w, _, _ in after_same)
+            after_weight = [(sz, i) for w, sz, i in after_same if w == min_weight]
+            min_size = min(sz for sz, _ in after_weight)
+            best_indices = [i for sz, i in after_weight if sz == min_size]
             idx = random.choice(best_indices)
 
             teams_simple[idx].append(p)
@@ -215,7 +231,7 @@ class SplitService:
                 for p in members:
                     role = final_roles[p.user_id]
                     assigned_poke[p.user_id] = self._assign_pokemon(
-                        tidx, role, allow_cross, used_global, used_team
+                        tidx, role, allow_cross, used_global, used_team, cfg.banned_pokemon
                     )
 
         # 4) TeamResult へ構築
@@ -331,7 +347,6 @@ class SplitService:
                 res = dfs(i + 1, used, mapping)
                 if res is not None:
                     return res
-                # 戻す
                 used.remove(ri)
                 del mapping[p.user_id]
 
@@ -359,19 +374,16 @@ class SplitService:
     # ポケモン割当
     # =======================================================
     def _load_pokemon_list(self) -> Dict[str, List[str]]:
-        """data/pokemon_list.yaml を読む"""
         path = Path("data/pokemon_list.yaml")
-        if not path.exists():
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except FileNotFoundError:
             return {}
+        return {key: [str(v) for v in data.get(key, [])] for key in ROLE_KEYS}
 
-        import yaml
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-
-        result: Dict[str, List[str]] = {}
-        for key in ROLE_KEYS:
-            lst = data.get(key, [])
-            result[key] = [str(v) for v in lst]
-        return result
+    def get_all_pokemon_names(self) -> List[str]:
+        """全ポケモン名のリストを返す（autocomplete用）"""
+        return [name for names in self._pokemon_by_role.values() for name in names]
 
     def _assign_pokemon(
         self,
@@ -380,8 +392,9 @@ class SplitService:
         allow_cross_dup: bool,
         used_global: set,
         used_team: List[set],
+        banned: frozenset,
     ) -> str:
-        pool = self._pokemon_by_role.get(role_key, [])
+        pool = [p for p in self._pokemon_by_role.get(role_key, []) if p not in banned]
         if not pool:
             return ""
 

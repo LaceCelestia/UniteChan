@@ -1,13 +1,14 @@
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, FrozenSet, Optional
 
 
 @dataclass
 class SplitConfig:
     role_balance_targets: Dict[str, int]
     avoid_count: int
+    banned_pokemon: FrozenSet[str] = field(default_factory=frozenset)
 
 
 class ConfigStore:
@@ -47,7 +48,6 @@ class ConfigStore:
         role_raw = split.get('role_balance', {})
         if not isinstance(role_raw, dict):
             role_raw = {}
-        # デフォルトは全部0
         role_balance_targets = {
             'attacker': int(role_raw.get('attacker', 0) or 0),
             'all_rounder': int(role_raw.get('all_rounder', 0) or 0),
@@ -56,12 +56,12 @@ class ConfigStore:
             'supporter': int(role_raw.get('supporter', 0) or 0),
         }
         avoid_count = int(split.get('avoid', 0) or 0)
-        # avoid は 0〜5 に丸めておく
-        if avoid_count < 0:
-            avoid_count = 0
-        if avoid_count > 5:
-            avoid_count = 5
-        return SplitConfig(role_balance_targets=role_balance_targets, avoid_count=avoid_count)
+        banned_pokemon = frozenset(str(v) for v in g.get('banned_pokemon', []))
+        return SplitConfig(
+            role_balance_targets=role_balance_targets,
+            avoid_count=avoid_count,
+            banned_pokemon=banned_pokemon,
+        )
 
     def set_role_balance_targets(
         self,
@@ -87,14 +87,49 @@ class ConfigStore:
     def set_avoid_count(self, guild_id: int, count: int) -> None:
         g = self._ensure_guild(guild_id)
         split = g.get('split') or {}
-        c = int(count)
-        if c < 0:
-            c = 0
-        if c > 5:
-            c = 5
+        c = max(0, min(5, int(count)))
         split['avoid'] = c
         g['split'] = split
         self._save()
+
+    # ---- バンポケモン ----
+
+    def get_banned_pokemon(self, guild_id: int) -> FrozenSet[str]:
+        g = self._ensure_guild(guild_id)
+        return frozenset(str(v) for v in g.get('banned_pokemon', []))
+
+    def ban_pokemon(self, guild_id: int, name: str) -> bool:
+        """True: 新規バン / False: すでにバン済み"""
+        g = self._ensure_guild(guild_id)
+        banned = set(g.get('banned_pokemon', []))
+        if name in banned:
+            return False
+        banned.add(name)
+        g['banned_pokemon'] = sorted(banned)
+        self._save()
+        return True
+
+    def unban_pokemon(self, guild_id: int, name: str) -> bool:
+        """True: 解除成功 / False: バンされていない"""
+        g = self._ensure_guild(guild_id)
+        banned = set(g.get('banned_pokemon', []))
+        if name not in banned:
+            return False
+        banned.discard(name)
+        g['banned_pokemon'] = sorted(banned)
+        self._save()
+        return True
+
+    def clear_banned_pokemon(self, guild_id: int) -> int:
+        """バンをすべて解除し、解除した件数を返す"""
+        g = self._ensure_guild(guild_id)
+        count = len(g.get('banned_pokemon', []))
+        if count:
+            g['banned_pokemon'] = []
+            self._save()
+        return count
+
+    # ---- その他 ----
 
     def reset_guild(self, guild_id: int) -> None:
         gid = str(guild_id)
@@ -105,10 +140,15 @@ class ConfigStore:
     def describe_split_config(self, guild_id: int) -> str:
         cfg = self.get_split_config(guild_id)
         rb = cfg.role_balance_targets
-        parts = []
-        parts.append(f"ロールバランス(1チーム想定): ATK={rb['attacker']} ALL={rb['all_rounder']} SPD={rb['speedster']} DEF={rb['defender']} SUP={rb['supporter']}")
-        parts.append(f'連続ロール回避 avoid={cfg.avoid_count} (0で無効, 最大5)')
-        return '\n'.join(parts)
+        lines = [
+            f"ロールバランス(1チーム想定): ATK={rb['attacker']} ALL={rb['all_rounder']} SPD={rb['speedster']} DEF={rb['defender']} SUP={rb['supporter']}",
+            f'連続ロール回避 avoid={cfg.avoid_count} (0で無効, 最大5)',
+        ]
+        if cfg.banned_pokemon:
+            lines.append(f'バン中ポケモン ({len(cfg.banned_pokemon)}件): {", ".join(sorted(cfg.banned_pokemon))}')
+        else:
+            lines.append('バン中ポケモン: なし')
+        return '\n'.join(lines)
 
 
 _STORE: Optional[ConfigStore] = None

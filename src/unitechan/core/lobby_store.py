@@ -127,6 +127,12 @@ class LobbyStore:
         self._save_state()
         return True
 
+    def set_members(self, guild_id: int, user_ids: Set[int]) -> None:
+        """ロビーを指定メンバーで丸ごと置き換える（ランクは保持）"""
+        LobbyStore._ranks.setdefault(guild_id, {})
+        LobbyStore._lobbies[guild_id] = set(user_ids)
+        self._save_state()
+
     def snapshot(self, guild_id: int) -> Tuple[Set[int], Dict[int, str]]:
         self._ensure_guild(guild_id)
         return set(LobbyStore._lobbies[guild_id]), dict(LobbyStore._ranks[guild_id])
