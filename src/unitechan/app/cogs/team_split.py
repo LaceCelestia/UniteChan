@@ -15,6 +15,7 @@ from unitechan.core.split_service import (
     SplitResult,
 )
 from unitechan.core.config_store import get_store
+from unitechan.core.stats_store import get_stats_store
 
 
 # /split test 用のデモプレイヤー（名前・ランク）
@@ -179,6 +180,65 @@ class TeamSplit(commands.Cog):
 
         result = self.service.split_custom(guild_id, players, m, cfg)
         await self._display(interaction, result, m, cfg, resolve_names=False)
+
+
+    # -------------------------------------------------- /split move --
+
+    @split.command(name="move", description="直前のチーム分け結果に従ってVCを移動します（管理者専用）")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(
+        channel_a="Team A を移動させるボイスチャンネル",
+        channel_b="Team B を移動させるボイスチャンネル",
+    )
+    async def split_move(
+        self,
+        interaction: discord.Interaction,
+        channel_a: discord.VoiceChannel,
+        channel_b: discord.VoiceChannel,
+    ) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("サーバー内で使ってね。", ephemeral=True)
+            return
+
+        last = get_stats_store().get_last_match(interaction.guild.id)
+        if not last:
+            await interaction.response.send_message(
+                "直前のチーム分け結果がありません。先に `/split run` でチーム分けしてください。",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer()
+
+        channels = [channel_a, channel_b]
+        team_labels = ["🅰 Team A", "🅱 Team B"]
+        moved: List[List[str]] = [[], []]
+        skipped: List[str] = []
+
+        for tidx, uids in enumerate(last):
+            for uid in uids:
+                member = interaction.guild.get_member(uid)
+                if member is None or member.voice is None:
+                    name = member.display_name if member else f"<@{uid}>"
+                    skipped.append(name)
+                    continue
+                try:
+                    await member.move_to(channels[tidx])
+                    moved[tidx].append(member.display_name)
+                except (discord.Forbidden, discord.HTTPException):
+                    skipped.append(member.display_name)
+
+        embed = discord.Embed(title="🎙️ VC移動完了")
+        for tidx, names in enumerate(moved):
+            embed.add_field(
+                name=f"{team_labels[tidx]} → {channels[tidx].name}（{len(names)}人）",
+                value="\n".join(f"・{n}" for n in names) if names else "(移動なし)",
+                inline=True,
+            )
+        if skipped:
+            embed.set_footer(text=f"VCに未参加のためスキップ: {', '.join(skipped)}")
+
+        await interaction.followup.send(embed=embed)
 
 
 async def setup(bot: commands.Bot):
