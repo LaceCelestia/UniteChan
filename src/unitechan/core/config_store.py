@@ -92,6 +92,21 @@ class ConfigStore:
         g['split'] = split
         self._save()
 
+    # ---- VC チャンネル ----
+
+    def set_vc_channel(self, guild_id: int, team_idx: int, channel_id: int) -> None:
+        """team_idx=0: Team A, 1: Team B"""
+        g = self._ensure_guild(guild_id)
+        vc = g.setdefault('vc_channels', {})
+        vc[str(team_idx)] = channel_id
+        self._save()
+
+    def get_vc_channels(self, guild_id: int) -> tuple[int | None, int | None]:
+        """(team_a_channel_id, team_b_channel_id) を返す。未設定は None。"""
+        g = self._ensure_guild(guild_id)
+        vc = g.get('vc_channels', {})
+        return vc.get('0'), vc.get('1')
+
     # ---- バンポケモン ----
 
     def get_banned_pokemon(self, guild_id: int) -> FrozenSet[str]:

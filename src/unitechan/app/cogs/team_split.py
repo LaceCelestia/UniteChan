@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 import discord
 from discord import app_commands
@@ -187,18 +187,40 @@ class TeamSplit(commands.Cog):
     @split.command(name="move", description="直前のチーム分け結果に従ってVCを移動します（管理者専用）")
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.describe(
-        channel_a="Team A を移動させるボイスチャンネル",
-        channel_b="Team B を移動させるボイスチャンネル",
+        channel_a="Team A を移動させるVC（省略時は /config vc の設定値を使用）",
+        channel_b="Team B を移動させるVC（省略時は /config vc の設定値を使用）",
     )
     async def split_move(
         self,
         interaction: discord.Interaction,
-        channel_a: discord.VoiceChannel,
-        channel_b: discord.VoiceChannel,
+        channel_a: Optional[discord.VoiceChannel] = None,
+        channel_b: Optional[discord.VoiceChannel] = None,
     ) -> None:
         if interaction.guild is None:
             await interaction.response.send_message("サーバー内で使ってね。", ephemeral=True)
             return
+
+        # 省略時はコンフィグのデフォルトVCを使用
+        if channel_a is None or channel_b is None:
+            cfg_a_id, cfg_b_id = get_store().get_vc_channels(interaction.guild.id)
+            if channel_a is None:
+                ch = interaction.guild.get_channel(cfg_a_id) if cfg_a_id else None
+                if not isinstance(ch, discord.VoiceChannel):
+                    await interaction.response.send_message(
+                        "Team A のVCが設定されていません。`/config vc` で設定するか、引数で直接指定してください。",
+                        ephemeral=True,
+                    )
+                    return
+                channel_a = ch
+            if channel_b is None:
+                ch = interaction.guild.get_channel(cfg_b_id) if cfg_b_id else None
+                if not isinstance(ch, discord.VoiceChannel):
+                    await interaction.response.send_message(
+                        "Team B のVCが設定されていません。`/config vc` で設定するか、引数で直接指定してください。",
+                        ephemeral=True,
+                    )
+                    return
+                channel_b = ch
 
         last = get_stats_store().get_last_match(interaction.guild.id)
         if not last:

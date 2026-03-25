@@ -69,6 +69,41 @@ async def config_avoid(
     )
 
 
+@config_group.command(name='vc', description='/split move で使うデフォルトVCを設定します（管理者専用）')
+@app_commands.describe(
+    team='設定するチーム',
+    channel='デフォルトで使用するボイスチャンネル',
+)
+@app_commands.choices(team=[
+    app_commands.Choice(name='Team A', value='a'),
+    app_commands.Choice(name='Team B', value='b'),
+])
+async def config_vc(
+    interaction: discord.Interaction,
+    team: str,
+    channel: discord.VoiceChannel,
+) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
+        return
+
+    if not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
+        return
+    perms = interaction.user.guild_permissions
+    if not (perms.administrator or perms.manage_guild or perms.manage_roles):
+        await interaction.response.send_message('このコマンドは管理者のみ使用できます。', ephemeral=True)
+        return
+
+    team_idx = 0 if team == 'a' else 1
+    get_store().set_vc_channel(interaction.guild.id, team_idx, channel.id)
+    label = 'Team A' if team == 'a' else 'Team B'
+    await interaction.response.send_message(
+        f'{label} のデフォルトVCを **{channel.name}** に設定しました。',
+        ephemeral=True,
+    )
+
+
 @config_group.command(name='reset', description='このサーバーの /split 関連設定をリセットします')
 async def config_reset(interaction: discord.Interaction) -> None:
     if interaction.guild is None:
@@ -87,8 +122,15 @@ async def config_show(interaction: discord.Interaction) -> None:
         return
 
     store = get_store()
-    text = store.describe_split_config(interaction.guild.id)
-    await interaction.response.send_message(text, ephemeral=True)
+    guild_id = interaction.guild.id
+    lines = [store.describe_split_config(guild_id)]
+
+    ch_a_id, ch_b_id = store.get_vc_channels(guild_id)
+    ch_a = f'<#{ch_a_id}>' if ch_a_id else '未設定'
+    ch_b = f'<#{ch_b_id}>' if ch_b_id else '未設定'
+    lines.append(f'デフォルトVC: Team A={ch_a} / Team B={ch_b}')
+
+    await interaction.response.send_message('\n'.join(lines), ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:
