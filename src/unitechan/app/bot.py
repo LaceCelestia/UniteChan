@@ -50,6 +50,11 @@ def create_bot() -> commands.Bot:
             await bot.load_extension('unitechan.app.cogs.ban_commands')
         except Exception as exc:
             logger.exception('failed to load ban_commands: %s', exc)
+        # /result /stats 系
+        try:
+            await bot.load_extension('unitechan.app.cogs.result_commands')
+        except Exception as exc:
+            logger.exception('failed to load result_commands: %s', exc)
 
     async def setup_hook() -> None:  # type: ignore[override]
         await load_cogs()

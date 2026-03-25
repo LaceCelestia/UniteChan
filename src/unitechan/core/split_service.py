@@ -10,6 +10,7 @@ import yaml
 from .lobby_store import LobbyStore
 from .split_mode import SplitMode
 from .config_store import get_store
+from .stats_store import get_stats_store
 
 # ランク順：弱 → 強
 _RANK_ORDER = [
@@ -102,11 +103,13 @@ class SplitService:
 
         cfg = get_store().get_split_config(guild_id)
         result = self.split_custom(guild_id, players, mode, cfg, team_count)
+
+        team_uids = [[mem.user_id for mem in team.members] for team in result.teams]
         self._prev_teams[guild_id] = {
-            mem.user_id: tidx
-            for tidx, team in enumerate(result.teams)
-            for mem in team.members
+            uid: tidx for tidx, uids in enumerate(team_uids) for uid in uids
         }
+        get_stats_store().set_last_match(guild_id, team_uids)
+
         return result
 
     # =======================================================

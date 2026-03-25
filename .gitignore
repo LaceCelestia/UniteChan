@@ -45,3 +45,4 @@ build/
 # =========================
 .pytest_cache/
 .mypy_cache/
+data/stats_state.json
