@@ -92,6 +92,17 @@ class ConfigStore:
         g['split'] = split
         self._save()
 
+    # ---- デフォルト チーム分けコード ----
+
+    def set_split_code(self, guild_id: int, code: str) -> None:
+        g = self._ensure_guild(guild_id)
+        g.setdefault('split', {})['code'] = code
+        self._save()
+
+    def get_split_code(self, guild_id: int) -> str:
+        """未設定の場合は '00000' を返す"""
+        return self._ensure_guild(guild_id).get('split', {}).get('code', '00000')
+
     # ---- VC チャンネル ----
 
     def set_vc_channel(self, guild_id: int, team_idx: int, channel_id: int) -> None:
@@ -155,7 +166,9 @@ class ConfigStore:
     def describe_split_config(self, guild_id: int) -> str:
         cfg = self.get_split_config(guild_id)
         rb = cfg.role_balance_targets
+        code = self.get_split_code(guild_id)
         lines = [
+            f'チーム分けコード: {code}',
             f"ロールバランス(1チーム想定): ATK={rb['attacker']} ALL={rb['all_rounder']} SPD={rb['speedster']} DEF={rb['defender']} SUP={rb['supporter']}",
             f'連続ロール回避 avoid={cfg.avoid_count} (0で無効, 最大5)',
         ]

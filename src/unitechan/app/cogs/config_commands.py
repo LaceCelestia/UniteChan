@@ -3,9 +3,38 @@ from discord import app_commands
 from discord.ext import commands
 
 from unitechan.core.config_store import get_store
+from unitechan.core.split_mode import SplitMode
 
 
 config_group = app_commands.Group(name='config', description='ユナイトちゃんの設定')
+
+
+@config_group.command(name='split_code', description='デフォルトのチーム分けコードを設定します（管理者専用）')
+@app_commands.describe(code='5桁コード (例: 10000 / 11100 / 12111)')
+async def config_split_code(interaction: discord.Interaction, code: str) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
+        return
+
+    if not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
+        return
+    perms = interaction.user.guild_permissions
+    if not (perms.administrator or perms.manage_guild or perms.manage_roles):
+        await interaction.response.send_message('このコマンドは管理者のみ使用できます。', ephemeral=True)
+        return
+
+    try:
+        SplitMode.parse(code)
+    except ValueError as e:
+        await interaction.response.send_message(str(e), ephemeral=True)
+        return
+
+    get_store().set_split_code(interaction.guild.id, code)
+    await interaction.response.send_message(
+        f'チーム分けコードを **{code}** に設定しました。\n`/split run` で使用されます。',
+        ephemeral=True,
+    )
 
 
 @config_group.command(name='role_balance', description='b=2 用のロール構成(1チーム分)を設定します')

@@ -135,21 +135,15 @@ class TeamSplit(commands.Cog):
 
     # -------------------------------------------------- /split run --
 
-    @split.command(name="run", description="5桁コードでチーム分けを実行")
-    @app_commands.describe(mode="例: 00000 / 11110 / 12111")
-    async def split_run(self, interaction: discord.Interaction, mode: str) -> None:
+    @split.command(name="run", description="チーム分けを実行（コードは /config split_code で設定）")
+    async def split_run(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
             await interaction.response.send_message("サーバー内で使ってね。", ephemeral=True)
             return
 
-        try:
-            m = SplitMode.parse(mode)
-        except ValueError as e:
-            await interaction.response.send_message(str(e), ephemeral=True)
-            return
-
         guild_id = interaction.guild.id
         cfg = get_store().get_split_config(guild_id)
+        m = SplitMode(get_store().get_split_code(guild_id))
 
         result = self.service.split(guild_id, m)
         await self._display(interaction, result, m, cfg, resolve_names=True)
@@ -158,21 +152,23 @@ class TeamSplit(commands.Cog):
 
     @split.command(name="test", description="デモチーム分け（管理者専用）")
     @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(mode="例: 00000 / 11110 / 12111")
-    async def split_test(self, interaction: discord.Interaction, mode: str) -> None:
+    @app_commands.describe(mode="省略時は /config split_code の設定値を使用")
+    async def split_test(
+        self, interaction: discord.Interaction, mode: Optional[str] = None
+    ) -> None:
         if interaction.guild is None:
             await interaction.response.send_message("サーバー内で使ってね。", ephemeral=True)
             return
 
+        guild_id = interaction.guild.id
+        code = mode or get_store().get_split_code(guild_id)
         try:
-            m = SplitMode.parse(mode)
+            m = SplitMode.parse(code)
         except ValueError as e:
             await interaction.response.send_message(str(e), ephemeral=True)
             return
 
-        guild_id = interaction.guild.id
         cfg = get_store().get_split_config(guild_id)
-
         players: List[Player] = [
             Player(i + 1, name, rank)
             for i, (name, rank) in enumerate(_DEMO_PLAYERS)
