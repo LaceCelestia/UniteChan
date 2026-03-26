@@ -9,13 +9,7 @@ from discord.ext import commands
 from unitechan.core.config_store import get_store
 from unitechan.core.split_service import SplitService
 from unitechan.core.lobby_store import LobbyStore
-
-
-def _is_admin(interaction: discord.Interaction) -> bool:
-    if not isinstance(interaction.user, discord.Member):
-        return False
-    p = interaction.user.guild_permissions
-    return p.administrator or p.manage_guild or p.manage_roles
+from unitechan.app.cogs._utils import is_admin
 
 
 class BanCommands(commands.Cog):
@@ -58,7 +52,7 @@ class BanCommands(commands.Cog):
         if interaction.guild is None:
             await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
             return
-        if not _is_admin(interaction):
+        if not is_admin(interaction):
             await interaction.response.send_message('このコマンドは管理者のみ使用できます。', ephemeral=True)
             return
 
@@ -75,7 +69,7 @@ class BanCommands(commands.Cog):
         if interaction.guild is None:
             await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
             return
-        if not _is_admin(interaction):
+        if not is_admin(interaction):
             await interaction.response.send_message('このコマンドは管理者のみ使用できます。', ephemeral=True)
             return
 
@@ -107,7 +101,7 @@ class BanCommands(commands.Cog):
         if interaction.guild is None:
             await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
             return
-        if not _is_admin(interaction):
+        if not is_admin(interaction):
             await interaction.response.send_message('このコマンドは管理者のみ使用できます。', ephemeral=True)
             return
 

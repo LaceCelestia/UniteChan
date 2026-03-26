@@ -7,13 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from unitechan.core.stats_store import get_stats_store
-
-
-def _is_admin(interaction: discord.Interaction) -> bool:
-    if not isinstance(interaction.user, discord.Member):
-        return False
-    p = interaction.user.guild_permissions
-    return p.administrator or p.manage_guild or p.manage_roles
+from unitechan.app.cogs._utils import is_admin
 
 
 async def _resolve_name(guild: discord.Guild, uid: int) -> str:
@@ -25,6 +19,22 @@ class ResultCommands(commands.Cog):
     """試合結果・戦績管理 Cog"""
 
     # ---- /result ----
+
+    @app_commands.command(name='result_undo', description='直前の試合結果記録を取り消します（管理者専用）')
+    async def result_undo(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
+            return
+        if not is_admin(interaction):
+            await interaction.response.send_message('このコマンドは管理者のみ使用できます。', ephemeral=True)
+            return
+
+        ok = get_stats_store().undo_last_result(interaction.guild.id)
+        if not ok:
+            await interaction.response.send_message('取り消せる記録がありません。', ephemeral=True)
+            return
+
+        await interaction.response.send_message('↩️ 直前の試合結果を取り消しました。', ephemeral=True)
 
     @app_commands.command(name='result', description='試合結果を記録します（Team A または Team B の勝利）')
     @app_commands.describe(team='勝利したチーム')
@@ -132,7 +142,7 @@ class ResultCommands(commands.Cog):
         if interaction.guild is None:
             await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
             return
-        if not _is_admin(interaction):
+        if not is_admin(interaction):
             await interaction.response.send_message('このコマンドは管理者のみ使用できます。', ephemeral=True)
             return
 

@@ -40,6 +40,8 @@ class TeamSplit(commands.Cog):
         self.bot = bot
         self.lobby_store = LobbyStore()
         self.service = SplitService(self.lobby_store)
+        # メッセージID -> guild_id。リアクション投票を待っている試合メッセージを管理
+        self._pending_votes: dict[int, int] = {}
 
     # /split グループ
     split = app_commands.Group(name="split", description="ユナイトチーム分けコマンド")
@@ -61,21 +63,15 @@ class TeamSplit(commands.Cog):
 
     # -------------------------------------------------- モード表示 --
 
-    def _mode_summary(self, mode: SplitMode, cfg) -> str:
+    def _mode_footer(self, mode: SplitMode, cfg) -> str:
         rank = "ON" if mode.use_rank_balance else "OFF"
-        pokemon = {0: "割当なし", 1: "個人割当", 2: "チーム割当"}.get(mode.pokemon_assign_mode, "?")
-        role = {0: "なし", 1: "自動", 2: "/config"}.get(mode.role_balance_mode, "?")
+        pokemon = {0: "なし", 1: "個人", 2: "チーム"}.get(mode.pokemon_assign_mode, "?")
+        role = {0: "なし", 1: "自動", 2: "設定値"}.get(mode.role_balance_mode, "?")
         dup = "許可" if mode.allow_cross_dup else "禁止"
-
-        # ★ここ修正：フラグが ON かつ avoid_count > 0 のときだけ「n回」
-        if mode.use_avoid and cfg.avoid_count > 0:
-            avoid = f"{cfg.avoid_count}回"
-        else:
-            avoid = "OFF"
-
+        avoid = f"{cfg.avoid_count}回" if mode.use_avoid and cfg.avoid_count > 0 else "OFF"
         return (
-            f"{mode.mode_raw} / ランク:{rank}・ポケモン:{pokemon}・"
-            f"ロール:{role}・重複:{dup}・連続回避:{avoid}"
+            f"{mode.mode_raw}  ランク:{rank} / ポケモン:{pokemon} / "
+            f"ロール:{role} / 重複:{dup} / 連続回避:{avoid}"
         )
 
     # -------------------------------------------------- 共通表示処理 --
@@ -88,19 +84,19 @@ class TeamSplit(commands.Cog):
         cfg,
         *,
         resolve_names: bool,
-    ) -> None:
-        """チーム分け結果をEmbedで表示する。"""
+    ) -> discord.Message:
+        """チーム分け結果をEmbedで表示し、送信したメッセージを返す。"""
 
-        embed = discord.Embed(
-            title="🏅 チーム分け結果",
-            description=self._mode_summary(mode, cfg),
-        )
+        NUMS = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩"]
+        TEAM_LABELS = ["🟦 Team A", "🟥 Team B"]
 
-        team_labels = ["🅰 Team A", "🅱 Team B"]
+        embed = discord.Embed(title="🏅 チーム分け結果", color=0xF1C40F)
 
         for idx, team in enumerate(result.teams):
+            label = TEAM_LABELS[idx]
             lines: List[str] = []
-            for mem in team.members:
+            for i, mem in enumerate(team.members):
+                num = NUMS[i] if i < len(NUMS) else f"{i + 1}."
                 if resolve_names:
                     name = await self._resolve_name(interaction, mem.user_id)
                 else:
@@ -108,34 +104,34 @@ class TeamSplit(commands.Cog):
 
                 if mem.pokemon:
                     code = ROLE_CODE.get(mem.role, mem.role[:3].upper())
-                    lines.append(f"・{name} [{code}] {mem.pokemon}")
+                    lines.append(f"{num} {name}  `{code}` {mem.pokemon}")
                 else:
-                    lines.append(f"・{name}")
-
-            if not lines:
-                lines.append("(なし)")
+                    lines.append(f"{num} {name}")
 
             embed.add_field(
-                name=f"{team_labels[idx]} ({len(team.members)}人)",
-                value="\n" + "\n".join(lines),
+                name=f"{label} — {len(team.members)}人",
+                value="\n".join(lines) if lines else "(なし)",
                 inline=True,
             )
 
         if cfg.banned_pokemon:
             embed.add_field(
-                name='🚫 バン中のポケモン',
-                value=' / '.join(sorted(cfg.banned_pokemon)),
+                name="\u200b",  # 空フィールドで改行
+                value=f"🚫 **バン中:** {' / '.join(sorted(cfg.banned_pokemon))}",
                 inline=False,
             )
 
+        embed.set_footer(text=self._mode_footer(mode, cfg))
+
         if interaction.response.is_done():
-            await interaction.followup.send(embed=embed)
+            return await interaction.followup.send(embed=embed)
         else:
             await interaction.response.send_message(embed=embed)
+            return await interaction.original_response()
 
     # -------------------------------------------------- /split run --
 
-    @split.command(name="run", description="チーム分けを実行（コードは /config split_code で設定）")
+    @split.command(name="run", description="チーム分けを実行（コードは /config split で設定）")
     async def split_run(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
             await interaction.response.send_message("サーバー内で使ってね。", ephemeral=True)
@@ -145,14 +141,21 @@ class TeamSplit(commands.Cog):
         cfg = get_store().get_split_config(guild_id)
         m = SplitMode(get_store().get_split_code(guild_id))
 
-        result = self.service.split(guild_id, m)
-        await self._display(interaction, result, m, cfg, resolve_names=True)
+        try:
+            result = self.service.split(guild_id, m)
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+        msg = await self._display(interaction, result, m, cfg, resolve_names=True)
+        await msg.add_reaction('🇦')
+        await msg.add_reaction('🇧')
+        self._pending_votes[msg.id] = guild_id
 
     # -------------------------------------------------- /split test --
 
     @split.command(name="test", description="デモチーム分け（管理者専用）")
     @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(mode="省略時は /config split_code の設定値を使用")
+    @app_commands.describe(mode="省略時は /config split の設定値を使用")
     async def split_test(
         self, interaction: discord.Interaction, mode: Optional[str] = None
     ) -> None:
@@ -174,9 +177,37 @@ class TeamSplit(commands.Cog):
             for i, (name, rank) in enumerate(_DEMO_PLAYERS)
         ]
 
-        result = self.service.split_custom(guild_id, players, m, cfg)
+        result = self.service.split_custom(guild_id, players, m, cfg, dry_run=True)
         await self._display(interaction, result, m, cfg, resolve_names=False)
 
+
+    # -------------------------------------------------- リアクション投票 --
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
+        """🇦/🇧 リアクションで試合結果を記録する。"""
+        if payload.message_id not in self._pending_votes:
+            return
+        if payload.user_id == self.bot.user.id:  # type: ignore[union-attr]
+            return
+
+        emoji = str(payload.emoji)
+        if emoji == '🇦':
+            winning_idx = 0
+        elif emoji == '🇧':
+            winning_idx = 1
+        else:
+            return
+
+        guild_id = self._pending_votes.pop(payload.message_id)
+        winners, losers = get_stats_store().record_result(guild_id, winning_idx)
+        if not winners:
+            return  # last_match が既に消えていた場合
+
+        team_label = 'Team A' if winning_idx == 0 else 'Team B'
+        channel = self.bot.get_channel(payload.channel_id)
+        if isinstance(channel, (discord.TextChannel, discord.Thread)):
+            await channel.send(f'🏆 **{team_label}** の勝利を記録しました！')
 
     # -------------------------------------------------- /split move --
 

@@ -11,15 +11,33 @@ load_dotenv(override=True)
 logger = logging.getLogger(__name__)
 
 
-def create_bot() -> commands.Bot:
+_COGS = [
+    'unitechan.app.cogs.team_split',
+    'unitechan.app.cogs.lobby',
+    'unitechan.app.cogs.config_commands',
+    'unitechan.app.cogs.ban_commands',
+    'unitechan.app.cogs.result_commands',
+]
+
+
+class UniteChanBot(commands.Bot):
+    async def setup_hook(self) -> None:
+        for cog in _COGS:
+            try:
+                await self.load_extension(cog)
+            except Exception as exc:
+                logger.exception('failed to load %s: %s', cog, exc)
+        await self.tree.sync()
+
+    async def on_ready(self) -> None:
+        logger.info(f'Logged in as {self.user} (ID: {self.user.id})')  # type: ignore[union-attr]
+
+
+def create_bot() -> UniteChanBot:
     intents = discord.Intents.default()
     intents.message_content = True
 
-    bot = commands.Bot(command_prefix='!', intents=intents)
-
-    @bot.event
-    async def on_ready() -> None:
-        logger.info(f'Logged in as {bot.user} (ID: {bot.user.id})')
+    bot = UniteChanBot(command_prefix='!', intents=intents)
 
     @bot.tree.command(name='sync', description='このサーバーのスラッシュコマンドを再同期します(管理者専用)')
     @app_commands.checks.has_permissions(administrator=True)
@@ -30,38 +48,6 @@ def create_bot() -> commands.Bot:
             ephemeral=True,
         )
 
-    async def load_cogs() -> None:
-        # 既存コマンド群
-        try:
-            await bot.load_extension('unitechan.app.cogs.team_split')
-        except Exception as exc:
-            logger.exception('failed to load team_split: %s', exc)
-        try:
-            await bot.load_extension('unitechan.app.cogs.lobby')
-        except Exception as exc:
-            logger.exception('failed to load lobby: %s', exc)
-        # /config 系
-        try:
-            await bot.load_extension('unitechan.app.cogs.config_commands')
-        except Exception as exc:
-            logger.exception('failed to load config_commands: %s', exc)
-        # /ban 系
-        try:
-            await bot.load_extension('unitechan.app.cogs.ban_commands')
-        except Exception as exc:
-            logger.exception('failed to load ban_commands: %s', exc)
-        # /result /stats 系
-        try:
-            await bot.load_extension('unitechan.app.cogs.result_commands')
-        except Exception as exc:
-            logger.exception('failed to load result_commands: %s', exc)
-
-    async def setup_hook() -> None:  # type: ignore[override]
-        await load_cogs()
-        # グローバルツリー同期
-        await bot.tree.sync()
-
-    bot.setup_hook = setup_hook  # type: ignore[assignment]
     return bot
 
 

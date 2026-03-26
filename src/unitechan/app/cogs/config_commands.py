@@ -9,7 +9,7 @@ from unitechan.core.split_mode import SplitMode
 config_group = app_commands.Group(name='config', description='ユナイトちゃんの設定')
 
 
-@config_group.command(name='split_code', description='デフォルトのチーム分けコードを設定します（管理者専用）')
+@config_group.command(name='split', description='デフォルトのチーム分けコードを設定します（管理者専用）')
 @app_commands.describe(code='5桁コード (例: 10000 / 11100 / 12111)')
 async def config_split_code(interaction: discord.Interaction, code: str) -> None:
     if interaction.guild is None:

@@ -122,8 +122,9 @@ class SplitService:
         mode: SplitMode,
         cfg,
         team_count: int = 2,
+        dry_run: bool = False,
     ) -> SplitResult:
-        return self._split_players(guild_id, players, mode, cfg, team_count)
+        return self._split_players(guild_id, players, mode, cfg, team_count, dry_run=dry_run)
 
     # =======================================================
     # 内部メイン
@@ -135,6 +136,7 @@ class SplitService:
         mode: SplitMode,
         cfg,
         team_count: int,
+        dry_run: bool = False,
     ) -> SplitResult:
 
         # 1) ランクバランス or ランダム
@@ -195,29 +197,31 @@ class SplitService:
 
         # 2) ロール割当
         final_roles: Dict[int, str] = {}
-        guild_hist = self._role_history.setdefault(guild_id, {})
+        # dry_run（テスト実行）の場合は使い捨てのdictを使い、本番の履歴を汚染しない
+        guild_hist = {} if dry_run else self._role_history.setdefault(guild_id, {})
 
         for tidx, members in enumerate(teams_simple):
             roles = self._assign_roles_for_team(len(members), mode, cfg)
             use_avoid = mode.use_avoid and cfg.avoid_count > 0
 
-            # b=1（ロール自動）のときは、
-            #   ロール構成は固定（ATK/ALL/SPD/DEF/SUP 1個ずつ）
-            #   「誰にどのロールを割り当てるか」だけを avoid を考慮して決める
-            if mode.role_balance_mode == 1 and use_avoid:
+            if mode.role_balance_mode in (1, 2) and use_avoid:
+                # 固定ロール構成 (b=1 or b=2) + 連続回避: DFS で最適割当
                 assignment = self._assign_roles_with_avoid(
                     members, roles, guild_hist, cfg.avoid_count
                 )
                 for p in members:
                     final_roles[p.user_id] = assignment[p.user_id]
             else:
-                # それ以外は従来通り（ロールをシャッフルして割当）
                 random.shuffle(roles)
                 for p, role in zip(members, roles):
                     if use_avoid:
                         hist = guild_hist.setdefault(p.user_id, [])
-                        if hist and hist[-1] == role:
-                            role = self._next_role(role)
+                        banned_roles = set(hist[-cfg.avoid_count:])
+                        if role in banned_roles:
+                            # mode=0 はロール自由なので banned を除いた全ロールから選ぶ
+                            alternatives = [r for r in ROLE_KEYS if r not in banned_roles]
+                            if alternatives:
+                                role = random.choice(alternatives)
                         hist.append(role)
                         if len(hist) > cfg.avoid_count:
                             del hist[0]
@@ -297,13 +301,6 @@ class SplitService:
             roles = roles[:size]
 
         return roles
-
-    def _next_role(self, role: str) -> str:
-        try:
-            idx = ROLE_KEYS.index(role)
-        except ValueError:
-            return role
-        return ROLE_KEYS[(idx + 1) % len(ROLE_KEYS)]
 
     def _assign_roles_with_avoid(
         self,

@@ -30,30 +30,39 @@ class Lobby(commands.Cog):
     # ---- コマンド ----
 
     @app_commands.command(name='join', description='ユナイト用ロビーに参加します')
-    async def join(self, interaction: discord.Interaction) -> None:
+    @app_commands.describe(member='参加させるメンバー（省略時は自分）管理者専用')
+    async def join(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member | None = None,
+    ) -> None:
         if interaction.guild is None:
             await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
             return
 
-        if interaction.user.bot:
-            await interaction.response.send_message('Bot はロビーに参加できないよ。', ephemeral=True)
+        if member is not None and not await self._require_admin(interaction):
             return
 
+        target = member or interaction.user
         guild_id = interaction.guild.id
         lobby = self.store.get_lobby(guild_id)
 
-        if interaction.user.id in lobby:
-            await interaction.response.send_message(
-                f'すでにロビーに参加しています。\n現在人数: **{len(lobby)}人**',
-                ephemeral=True,
+        if target.id in lobby:
+            msg = (
+                f'{target.display_name} はすでにロビーに参加しています。\n現在人数: **{len(lobby)}人**'
+                if member else
+                f'すでにロビーに参加しています。\n現在人数: **{len(lobby)}人**'
             )
+            await interaction.response.send_message(msg, ephemeral=True)
             return
 
-        size = self.store.join(guild_id, interaction.user.id)
-        await interaction.response.send_message(
-            f'ロビーに参加しました！\n現在人数: **{size}人**',
-            ephemeral=True,
+        size = self.store.join(guild_id, target.id)
+        msg = (
+            f'{target.display_name} をロビーに追加しました。\n現在人数: **{size}人**'
+            if member else
+            f'ロビーに参加しました！\n現在人数: **{size}人**'
         )
+        await interaction.response.send_message(msg, ephemeral=True)
 
     @app_commands.command(name='leave', description='ロビーから抜けます')
     async def leave(self, interaction: discord.Interaction) -> None:
@@ -146,8 +155,7 @@ class Lobby(commands.Cog):
         if not await self._require_admin(interaction):
             return
 
-        user = interaction.user
-        assert isinstance(user, discord.Member)
+        user = interaction.user  # type: ignore[assignment]  # _require_admin 済み
         vc = user.voice and user.voice.channel
         if vc is None:
             await interaction.response.send_message('あなたがVCに参加していません。', ephemeral=True)
@@ -165,6 +173,7 @@ class Lobby(commands.Cog):
         lines = '\n'.join(f'- {m.display_name}' for m in members)
         await interaction.response.send_message(
             f'**{vc.name}** のメンバー {len(members)}人 をロビーに登録しました。\n{lines}',
+            ephemeral=True,
         )
 
     @app_commands.command(name='lobby_clear', description='ロビーを全員解散します（管理者専用）')

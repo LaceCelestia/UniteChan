@@ -74,8 +74,29 @@ class StatsStore:
             r['losses'] += 1
 
         del g['last_match']
+        g['last_result'] = {'winners': winners, 'losers': losers}
         self._save()
         return winners, losers
+
+    def undo_last_result(self, guild_id: int) -> bool:
+        """直前の record_result を取り消す。成功したら True を返す。"""
+        g = self._ensure_guild(guild_id)
+        last = g.pop('last_result', None)
+        if not last:
+            return False
+
+        records = g.get('records', {})
+        for uid in last['winners']:
+            r = records.get(str(uid))
+            if r:
+                r['wins'] = max(0, r['wins'] - 1)
+        for uid in last['losers']:
+            r = records.get(str(uid))
+            if r:
+                r['losses'] = max(0, r['losses'] - 1)
+
+        self._save()
+        return True
 
     # ---- 戦績参照 ----
 
@@ -92,6 +113,7 @@ class StatsStore:
         g = self._ensure_guild(guild_id)
         count = len(g.get('records', {}))
         g.pop('records', None)
+        g.pop('last_result', None)
         self._save()
         return count
 
