@@ -21,6 +21,7 @@ class LobbyStore:
     _data_path: Path = Path("data/lobby_state.json")
     _lobbies: Dict[int, Set[int]] = {}
     _ranks: Dict[int, Dict[int, str]] = {}
+    _aliases: Dict[int, Dict[int, str]] = {}  # guild_id -> {user_id -> alias}
     _loaded: bool = False
 
     def __init__(self, data_path: Optional[Path] = None) -> None:
@@ -37,6 +38,7 @@ class LobbyStore:
     def _ensure_guild(self, guild_id: int) -> None:
         LobbyStore._lobbies.setdefault(guild_id, set())
         LobbyStore._ranks.setdefault(guild_id, {})
+        LobbyStore._aliases.setdefault(guild_id, {})
 
     def _normalize_rank(self, value: str) -> str:
         return _EN_TO_JP_RANK.get(value, value)
@@ -65,8 +67,16 @@ class LobbyStore:
                     uid = int(uid_str)
                     ranks[uid] = self._normalize_rank(str(rank))
 
+            aliases_raw = info.get('aliases', {})
+            aliases: Dict[int, str] = {
+                int(uid_str): str(name)
+                for uid_str, name in aliases_raw.items()
+                if uid_str.isdigit()
+            }
+
             LobbyStore._lobbies[gid] = members
             LobbyStore._ranks[gid] = ranks
+            LobbyStore._aliases[gid] = aliases
 
         self._save_state()
 
@@ -77,9 +87,11 @@ class LobbyStore:
         data = {}
         for gid, members in LobbyStore._lobbies.items():
             ranks = LobbyStore._ranks.get(gid, {})
+            aliases = LobbyStore._aliases.get(gid, {})
             data[str(gid)] = {
                 'members': list(members),
                 'ranks': {str(uid): rank for uid, rank in ranks.items()},
+                'aliases': {str(uid): name for uid, name in aliases.items()},
             }
 
         path.write_text(
@@ -131,6 +143,18 @@ class LobbyStore:
         """ロビーを指定メンバーで丸ごと置き換える（ランクは保持）"""
         LobbyStore._ranks.setdefault(guild_id, {})
         LobbyStore._lobbies[guild_id] = set(user_ids)
+        self._save_state()
+
+    def get_alias(self, guild_id: int, user_id: int) -> str | None:
+        self._ensure_guild(guild_id)
+        return LobbyStore._aliases[guild_id].get(user_id)
+
+    def set_alias(self, guild_id: int, user_id: int, name: str | None) -> None:
+        self._ensure_guild(guild_id)
+        if name:
+            LobbyStore._aliases[guild_id][user_id] = name
+        else:
+            LobbyStore._aliases[guild_id].pop(user_id, None)
         self._save_state()
 
     def snapshot(self, guild_id: int) -> Tuple[Set[int], Dict[int, str]]:
