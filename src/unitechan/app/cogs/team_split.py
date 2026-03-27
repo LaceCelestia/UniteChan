@@ -126,6 +126,14 @@ class TeamSplit(commands.Cog):
                 else:
                     lines.append(f"{num} {name}")
 
+            if team.team_pokemon:
+                lines.append("")
+                poke_parts = [
+                    f"`{ROLE_CODE.get(r, r[:3].upper())}` {p}"
+                    for r, p in team.team_pokemon
+                ]
+                lines.append("🎮 " + "  ".join(poke_parts))
+
             embed.add_field(
                 name=f"{label} — {len(team.members)}人",
                 value="\n".join(lines) if lines else "(なし)",
@@ -347,6 +355,13 @@ class TeamSplit(commands.Cog):
             embed.set_footer(text=f"VCに未参加のためスキップ: {', '.join(skipped)}")
 
         await channel.send(embed=embed)
+
+        # VC移動済みなのでリロール不可にする
+        try:
+            msg = await channel.fetch_message(payload.message_id)
+            await msg.clear_reaction('🔄')
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+            pass
 
     async def _reaction_reroll(
         self,

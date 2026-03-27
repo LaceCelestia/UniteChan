@@ -75,6 +75,8 @@ class TeamMemberAssignment:
 @dataclass
 class TeamResult:
     members: List[TeamMemberAssignment]
+    # c=2 チーム割当用: [(role_key, pokemon_name), ...] ロール順
+    team_pokemon: Optional[List[tuple]] = None
 
     @property
     def total_rank_value(self) -> int:
@@ -303,17 +305,33 @@ class SplitService:
 
         # 3) ポケモン割当
         assigned_poke: Dict[int, Optional[str]] = {p.user_id: None for p in players}
-        if mode.pokemon_assign_mode in (1, 2):
-            allow_cross = mode.allow_cross_dup
-            used_global: set[str] = set()
-            used_team: List[set[str]] = [set() for _ in range(team_count)]
+        team_pokemon_sets: List[Optional[List[tuple]]] = [None] * team_count
 
+        allow_cross = mode.allow_cross_dup
+        used_global: set[str] = set()
+        used_team: List[set[str]] = [set() for _ in range(team_count)]
+
+        if mode.pokemon_assign_mode == 1:
+            # 個人割当: ロールに合ったポケモンを1人1匹ずつ
             for tidx, members in enumerate(teams_simple):
                 for p in members:
                     role = final_roles[p.user_id]
-                    assigned_poke[p.user_id] = self._assign_pokemon(
+                    poke = self._assign_pokemon(
                         tidx, role, allow_cross, used_global, used_team, cfg.banned_pokemon
                     )
+                    assigned_poke[p.user_id] = poke or None
+
+        elif mode.pokemon_assign_mode == 2:
+            # チーム割当: チームごとに全5ロール各1匹のセットを生成
+            for tidx in range(team_count):
+                team_set: List[tuple] = []
+                for role in ROLE_KEYS:
+                    poke = self._assign_pokemon(
+                        tidx, role, allow_cross, used_global, used_team, cfg.banned_pokemon
+                    )
+                    if poke:
+                        team_set.append((role, poke))
+                team_pokemon_sets[tidx] = team_set if team_set else None
 
         # 4) TeamResult へ構築
         team_results: List[TeamResult] = []
@@ -331,7 +349,7 @@ class SplitService:
                         rank_value=rv,
                     )
                 )
-            team_results.append(TeamResult(arr))
+            team_results.append(TeamResult(arr, team_pokemon=team_pokemon_sets[tidx]))
 
         return SplitResult(team_results)
 
