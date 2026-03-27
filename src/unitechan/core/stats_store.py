@@ -1,8 +1,20 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+_JST = timezone(timedelta(hours=9))
+_DAY_RESET_HOUR = 5  # 05:00 JST で日付切替
+
+
+def _today_jst() -> str:
+    """JST 05:00 を境に日付を返す（05:00未満は前日扱い）。"""
+    now = datetime.now(_JST)
+    if now.hour < _DAY_RESET_HOUR:
+        now = now - timedelta(days=1)
+    return now.strftime('%Y-%m-%d')
 
 
 class StatsStore:
@@ -73,8 +85,17 @@ class StatsStore:
             r = records.setdefault(str(uid), {'wins': 0, 'losses': 0})
             r['losses'] += 1
 
+        today = _today_jst()
+        daily = g.setdefault('daily_records', {}).setdefault(today, {})
+        for uid in winners:
+            r = daily.setdefault(str(uid), {'wins': 0, 'losses': 0})
+            r['wins'] += 1
+        for uid in losers:
+            r = daily.setdefault(str(uid), {'wins': 0, 'losses': 0})
+            r['losses'] += 1
+
         del g['last_match']
-        g['last_result'] = {'winners': winners, 'losers': losers}
+        g['last_result'] = {'winners': winners, 'losers': losers, 'date': today}
         self._save()
         return winners, losers
 
@@ -95,14 +116,55 @@ class StatsStore:
             if r:
                 r['losses'] = max(0, r['losses'] - 1)
 
+        date = last.get('date', _today_jst())
+        daily = g.get('daily_records', {}).get(date, {})
+        for uid in last['winners']:
+            r = daily.get(str(uid))
+            if r:
+                r['wins'] = max(0, r['wins'] - 1)
+        for uid in last['losers']:
+            r = daily.get(str(uid))
+            if r:
+                r['losses'] = max(0, r['losses'] - 1)
+
         self._save()
         return True
+
+    # ---- チーム履歴・ロール履歴（チーム分け品質向上用） ----
+
+    def set_prev_match(self, guild_id: int, teams: List[List[int]]) -> None:
+        """直前のチーム構成を保存。last_match と違い record_result では消さない。"""
+        g = self._ensure_guild(guild_id)
+        g['prev_match'] = [list(team) for team in teams]
+        self._save()
+
+    def get_prev_match(self, guild_id: int) -> Optional[List[List[int]]]:
+        return self._ensure_guild(guild_id).get('prev_match')
+
+    def set_role_history(self, guild_id: int, hist: Dict[int, List[str]]) -> None:
+        g = self._ensure_guild(guild_id)
+        g['role_history'] = {str(uid): list(roles) for uid, roles in hist.items()}
+        self._save()
+
+    def get_role_history(self, guild_id: int) -> Dict[int, List[str]]:
+        g = self._ensure_guild(guild_id)
+        return {int(uid): list(roles) for uid, roles in g.get('role_history', {}).items()}
 
     # ---- 戦績参照 ----
 
     def get_record(self, guild_id: int, user_id: int) -> Dict[str, int]:
         g = self._ensure_guild(guild_id)
         return dict(g.get('records', {}).get(str(user_id), {'wins': 0, 'losses': 0}))
+
+    def get_daily_records(self, guild_id: int, date_str: Optional[str] = None) -> Dict[int, Dict[str, int]]:
+        """指定日（省略時は今日JST）の戦績を返す。"""
+        if date_str is None:
+            date_str = _today_jst()
+        g = self._ensure_guild(guild_id)
+        return {
+            int(uid): dict(r)
+            for uid, r in g.get('daily_records', {}).get(date_str, {}).items()
+        }
 
     def get_all_records(self, guild_id: int) -> Dict[int, Dict[str, int]]:
         g = self._ensure_guild(guild_id)
@@ -114,6 +176,7 @@ class StatsStore:
         count = len(g.get('records', {}))
         g.pop('records', None)
         g.pop('last_result', None)
+        g.pop('daily_records', None)
         self._save()
         return count
 

@@ -11,6 +11,8 @@ class SplitMode:
       1桁目 a: 分け方モード
         0 = ランダム
         1 = ランクバランス ON
+        2 = 通算戦績（勝率）バランス
+        3 = 当日戦績（勝率）バランス
 
       2桁目 b: ロールバランス
         0 = 無視
@@ -36,6 +38,8 @@ class SplitMode:
 
     mode_raw: str
     use_rank_balance: bool
+    use_stats_balance: bool
+    use_daily_stats_balance: bool
     role_balance_mode: int
     pokemon_assign_mode: int
     use_avoid: bool
@@ -47,6 +51,8 @@ class SplitMode:
         # デフォルト値
         self.mode_raw = mode_raw
         self.use_rank_balance = False
+        self.use_stats_balance = False
+        self.use_daily_stats_balance = False
         self.role_balance_mode = 0
         self.pokemon_assign_mode = 0
         self.use_avoid = False
@@ -62,8 +68,10 @@ class SplitMode:
         if len(mode_raw) == 5 and mode_raw.isdigit():
             a, b, c, d, e = mode_raw
 
-            # 1桁目: ランクバランス
+            # 1桁目: バランス方式 (0=ランダム / 1=ランク / 2=通算戦績 / 3=当日戦績)
             self.use_rank_balance = (a == "1")
+            self.use_stats_balance = (a == "2")
+            self.use_daily_stats_balance = (a == "3")
 
             # 2桁目: ロールバランス (0/1/2)
             self.role_balance_mode = int(b)
@@ -87,6 +95,10 @@ class SplitMode:
             raise ValueError("5桁の数字で指定してね。例: 00000 / 11110 / 12111")
 
         a, b, c, d, e = text
+
+        # a は 0/1/2/3 だけ許可
+        if a not in ("0", "1", "2", "3"):
+            raise ValueError("1桁目（バランス方式）は 0〜3 で指定してね。0=ランダム / 1=ランク / 2=通算戦績 / 3=当日戦績")
 
         # b, c は 0/1/2 だけ許可
         if b not in ("0", "1", "2"):
