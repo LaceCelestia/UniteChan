@@ -7,22 +7,12 @@ from discord import app_commands
 from discord.ext import commands
 
 from unitechan.core.stats_store import get_stats_store
-from unitechan.core.lobby_store import LobbyStore
 from unitechan.app.cogs._utils import is_admin
 
 
 async def _resolve_name(guild: discord.Guild, uid: int) -> str:
-    alias = LobbyStore().get_alias(guild.id, uid)
-    if alias:
-        return alias
     m = guild.get_member(uid)
-    if m:
-        return m.display_name
-    try:
-        m = await guild.fetch_member(uid)
-        return m.display_name
-    except Exception:
-        return f'<@{uid}>'
+    return m.display_name if m else f'<@{uid}>'
 
 
 class ResultCommands(commands.Cog):
@@ -93,19 +83,11 @@ class ResultCommands(commands.Cog):
     stats = app_commands.Group(name='stats', description='戦績を確認します')
 
     @stats.command(name='show', description='戦績ランキングまたは個人の戦績を表示します')
-    @app_commands.describe(
-        member='指定すると個人の戦績を表示（省略時はランキング）',
-        period='表示する期間（省略時は通算）',
-    )
-    @app_commands.choices(period=[
-        app_commands.Choice(name='通算', value='all'),
-        app_commands.Choice(name='当日（05:00リセット）', value='today'),
-    ])
+    @app_commands.describe(member='指定すると個人の戦績を表示（省略時はランキング）')
     async def stats_show(
         self,
         interaction: discord.Interaction,
         member: Optional[discord.Member] = None,
-        period: str = 'all',
     ) -> None:
         if interaction.guild is None:
             await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
@@ -113,32 +95,20 @@ class ResultCommands(commands.Cog):
 
         store = get_stats_store()
         guild_id = interaction.guild.id
-        is_today = (period == 'today')
 
         if member is not None:
-            if is_today:
-                all_daily = store.get_daily_records(guild_id)
-                r = all_daily.get(member.id, {'wins': 0, 'losses': 0})
-            else:
-                r = store.get_record(guild_id, member.id)
+            r = store.get_record(guild_id, member.id)
             games = r['wins'] + r['losses']
             rate = f"{r['wins'] / games * 100:.1f}%" if games else '-%'
-            period_label = '当日' if is_today else '通算'
             embed = discord.Embed(
-                title=f'📊 {member.display_name} の戦績（{period_label}）',
+                title=f'📊 {member.display_name} の戦績',
                 description=f'**{r["wins"]}勝 {r["losses"]}敗**　勝率 {rate}　({games}試合)',
             )
             await interaction.response.send_message(embed=embed)
             return
 
         # ランキング表示
-        if is_today:
-            all_records = store.get_daily_records(guild_id)
-            title = '🏆 当日戦績ランキング'
-        else:
-            all_records = store.get_all_records(guild_id)
-            title = '🏆 通算戦績ランキング'
-
+        all_records = store.get_all_records(guild_id)
         if not all_records:
             await interaction.response.send_message('まだ戦績がありません。', ephemeral=True)
             return
@@ -161,7 +131,10 @@ class ResultCommands(commands.Cog):
             prefix = medals[rank] if rank < 3 else f'**{rank + 1}.**'
             lines.append(f"{prefix} {name}　{r['wins']}勝 {r['losses']}敗　勝率 {rate}")
 
-        embed = discord.Embed(title=title, description='\n'.join(lines))
+        embed = discord.Embed(
+            title='🏆 戦績ランキング',
+            description='\n'.join(lines),
+        )
         await interaction.response.send_message(embed=embed)
 
     @stats.command(name='reset', description='このサーバーの戦績をすべてリセットします（管理者専用）')

@@ -193,37 +193,5 @@ class Lobby(commands.Cog):
         await interaction.response.send_message(f'ロビーを解散しました。（{count}人）', ephemeral=True)
 
 
-    @app_commands.command(name='name', description='表示名（ニックネーム）を変更します')
-    @app_commands.describe(
-        name='新しい表示名（省略するとリセット）',
-        member='変更するメンバー（省略時は自分） ★管理者専用',
-    )
-    async def set_name(
-        self,
-        interaction: discord.Interaction,
-        name: str | None = None,
-        member: discord.Member | None = None,
-    ) -> None:
-        if interaction.guild is None:
-            await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
-            return
-
-        if member is not None and not await self._require_admin(interaction):
-            return
-
-        target = member or interaction.user
-        if not isinstance(target, discord.Member):
-            await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
-            return
-
-        self.store.set_alias(interaction.guild.id, target.id, name)  # type: ignore[union-attr]
-
-        if name:
-            msg = f'**{target.display_name}** の表示名を **{name}** に変更しました。' if member else f'表示名を **{name}** に変更しました。'
-        else:
-            msg = f'**{target.display_name}** の表示名をリセットしました。' if member else '表示名をリセットしました。'
-        await interaction.response.send_message(msg, ephemeral=True)
-
-
 async def setup(bot: commands.Bot):
     await bot.add_cog(Lobby(bot))

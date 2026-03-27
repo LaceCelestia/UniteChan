@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, FrozenSet, List, Optional
+from typing import Dict, List, Optional
 from pathlib import Path
 import random
 
@@ -31,15 +31,6 @@ def _rank_weight(rank: str) -> int:
     except ValueError:
         return 3
     return idx + 1
-
-
-def _stats_weight(record: dict) -> float:
-    """勝率 → 重み（1.0〜7.0、データなしは4.0）"""
-    wins = record.get('wins', 0)
-    total = wins + record.get('losses', 0)
-    if total == 0:
-        return 4.0
-    return (wins / total) * 6.0 + 1.0
 
 
 # ロールキー
@@ -110,14 +101,6 @@ class SplitService:
             for uid in lobby
         ]
 
-        # 再起動後に備えてディスクからチーム履歴を遅延ロード
-        if guild_id not in self._prev_teams:
-            prev = get_stats_store().get_prev_match(guild_id)
-            if prev:
-                self._prev_teams[guild_id] = {
-                    uid: tidx for tidx, uids in enumerate(prev) for uid in uids
-                }
-
         cfg = get_store().get_split_config(guild_id)
         result = self.split_custom(guild_id, players, mode, cfg, team_count)
 
@@ -125,14 +108,7 @@ class SplitService:
         self._prev_teams[guild_id] = {
             uid: tidx for tidx, uids in enumerate(team_uids) for uid in uids
         }
-
-        store = get_stats_store()
-        store.set_last_match(guild_id, team_uids)
-        store.set_prev_match(guild_id, team_uids)
-
-        # ロール履歴もディスクに永続化
-        if guild_id in self._role_history:
-            store.set_role_history(guild_id, self._role_history[guild_id])
+        get_stats_store().set_last_match(guild_id, team_uids)
 
         return result
 
@@ -163,25 +139,13 @@ class SplitService:
         dry_run: bool = False,
     ) -> SplitResult:
 
-        # 1) バランス方式に応じてソート
-        stats_records: dict = {}
-        if mode.use_stats_balance:
-            stats_records = get_stats_store().get_all_records(guild_id)
-        elif mode.use_daily_stats_balance:
-            stats_records = get_stats_store().get_daily_records(guild_id)
-
-        use_stats = mode.use_stats_balance or mode.use_daily_stats_balance
-        if mode.use_rank_balance or use_stats:
-            # 一度シャッフルしてからソートすると、同重みの順番にゆらぎが出る
+        # 1) ランクバランス or ランダム
+        if mode.use_rank_balance:
+            # 一度シャッフルしてからランク順ソートすると、
+            # 同ランク帯の順番にゆらぎが出る
             base = list(players)
             random.shuffle(base)
-            if use_stats:
-                base.sort(
-                    key=lambda p: _stats_weight(stats_records.get(p.user_id, {})),
-                    reverse=True,
-                )
-            else:
-                base.sort(key=lambda p: _rank_weight(p.rank_name), reverse=True)
+            base.sort(key=lambda p: _rank_weight(p.rank_name), reverse=True)
         else:
             base = list(players)
             random.shuffle(base)
@@ -203,57 +167,37 @@ class SplitService:
         # 前回チーム履歴（なければ空）
         prev_teams = self._prev_teams.get(guild_id, {})
 
-        # 分離ペアを (min_uid, max_uid) の集合として保持
-        sep_pairs: FrozenSet[tuple] = cfg.separate_pairs
-
         for p in base:
             candidates = [
                 i for i in range(team_count)
                 if len(teams_simple[i]) < target_sizes[i]
             ]
 
-            # スコア: (分離ペア違反数, 前回同チーム人数, 総ランク値, 人数)
-            # → 分離ペア違反が少ないほど優先、次に前回チーム分散、次にランクバランス
+            # スコア: (前回同チーム人数, 総ランク値, 人数)
+            # → 前回同じチームだった人が少ないほど優先、次にランクバランス
             p_prev = prev_teams.get(p.user_id)
             scored = []
             for i in candidates:
-                sep_violation = sum(
-                    1 for pm in teams_simple[i]
-                    if (min(p.user_id, pm.user_id), max(p.user_id, pm.user_id)) in sep_pairs
-                )
                 same_prev = (
                     sum(1 for pm in teams_simple[i] if prev_teams.get(pm.user_id) == p_prev)
                     if p_prev is not None else 0
                 )
-                scored.append((sep_violation, same_prev, weights[i], len(teams_simple[i]), i))
+                scored.append((same_prev, weights[i], len(teams_simple[i]), i))
 
-            min_sep = min(s for s, *_ in scored)
-            if min_sep > 0:
-                # 全チームで分離違反が避けられない → 毎回違うペアになるようランダム割当
-                idx = random.choice(candidates)
-            else:
-                after_sep = [(sp, w, sz, i) for s, sp, w, sz, i in scored if s == 0]
-                min_same = min(sp for sp, *_ in after_sep)
-                after_same = [(w, sz, i) for sp, w, sz, i in after_sep if sp == min_same]
-                min_weight = min(w for w, _, _ in after_same)
-                after_weight = [(sz, i) for w, sz, i in after_same if w == min_weight]
-                min_size = min(sz for sz, _ in after_weight)
-                best_indices = [i for sz, i in after_weight if sz == min_size]
-                idx = random.choice(best_indices)
+            min_same = min(s for s, *_ in scored)
+            after_same = [(w, sz, i) for s, w, sz, i in scored if s == min_same]
+            min_weight = min(w for w, _, _ in after_same)
+            after_weight = [(sz, i) for w, sz, i in after_same if w == min_weight]
+            min_size = min(sz for sz, _ in after_weight)
+            best_indices = [i for sz, i in after_weight if sz == min_size]
+            idx = random.choice(best_indices)
 
             teams_simple[idx].append(p)
-            if use_stats:
-                weights[idx] += _stats_weight(stats_records.get(p.user_id, {}))
-            else:
-                weights[idx] += _rank_weight(p.rank_name)
+            weights[idx] += _rank_weight(p.rank_name)
 
         # 2) ロール割当
         final_roles: Dict[int, str] = {}
         # dry_run（テスト実行）の場合は使い捨てのdictを使い、本番の履歴を汚染しない
-        if not dry_run and guild_id not in self._role_history:
-            stored = get_stats_store().get_role_history(guild_id)
-            if stored:
-                self._role_history[guild_id] = stored
         guild_hist = {} if dry_run else self._role_history.setdefault(guild_id, {})
 
         for tidx, members in enumerate(teams_simple):
