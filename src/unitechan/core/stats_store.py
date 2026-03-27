@@ -150,6 +150,16 @@ class StatsStore:
         g = self._ensure_guild(guild_id)
         return {int(uid): list(roles) for uid, roles in g.get('role_history', {}).items()}
 
+    def set_pair_history(self, guild_id: int, hist: Dict[str, int]) -> None:
+        """ペアごとの同チーム累積回数を保存。key = "uid1_uid2" (uid1 < uid2)"""
+        g = self._ensure_guild(guild_id)
+        g['pair_history'] = dict(hist)
+        self._save()
+
+    def get_pair_history(self, guild_id: int) -> Dict[str, int]:
+        g = self._ensure_guild(guild_id)
+        return dict(g.get('pair_history', {}))
+
     # ---- 戦績参照 ----
 
     def get_record(self, guild_id: int, user_id: int) -> Dict[str, int]:

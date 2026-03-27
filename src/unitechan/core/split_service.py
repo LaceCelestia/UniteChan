@@ -94,8 +94,10 @@ class SplitService:
         self._pokemon_by_role = self._load_pokemon_list()
         # guild_id -> user_id -> [roles...]
         self._role_history: Dict[int, Dict[int, List[str]]] = {}
-        # guild_id -> user_id -> 直前の試合でのチームindex
+        # guild_id -> user_id -> 直前の試合でのチームindex（prev_match永続化用）
         self._prev_teams: Dict[int, Dict[int, int]] = {}
+        # guild_id -> (min_uid, max_uid) -> 同チーム累積回数
+        self._pair_history: Dict[int, Dict[tuple, int]] = {}
 
     # =======================================================
     # 外部用API（/split run）
@@ -110,13 +112,22 @@ class SplitService:
             for uid in lobby
         ]
 
-        # 再起動後に備えてディスクからチーム履歴を遅延ロード
+        store = get_stats_store()
+
+        # 再起動後に備えてディスクから履歴を遅延ロード
         if guild_id not in self._prev_teams:
-            prev = get_stats_store().get_prev_match(guild_id)
+            prev = store.get_prev_match(guild_id)
             if prev:
                 self._prev_teams[guild_id] = {
                     uid: tidx for tidx, uids in enumerate(prev) for uid in uids
                 }
+
+        if guild_id not in self._pair_history:
+            raw = store.get_pair_history(guild_id)
+            self._pair_history[guild_id] = {
+                (int(k.split('_')[0]), int(k.split('_')[1])): v
+                for k, v in raw.items()
+            }
 
         cfg = get_store().get_split_config(guild_id)
         result = self.split_custom(guild_id, players, mode, cfg, team_count)
@@ -126,9 +137,17 @@ class SplitService:
             uid: tidx for tidx, uids in enumerate(team_uids) for uid in uids
         }
 
-        store = get_stats_store()
+        # ペア履歴を更新
+        pair_hist = self._pair_history.setdefault(guild_id, {})
+        for uids in team_uids:
+            for i, uid1 in enumerate(uids):
+                for uid2 in uids[i + 1:]:
+                    key = (min(uid1, uid2), max(uid1, uid2))
+                    pair_hist[key] = pair_hist.get(key, 0) + 1
+
         store.set_last_match(guild_id, team_uids)
         store.set_prev_match(guild_id, team_uids)
+        store.set_pair_history(guild_id, {f"{k[0]}_{k[1]}": v for k, v in pair_hist.items()})
 
         # ロール履歴もディスクに永続化
         if guild_id in self._role_history:
@@ -200,8 +219,8 @@ class SplitService:
             for i in range(team_count)
         ]
 
-        # 前回チーム履歴（なければ空）
-        prev_teams = self._prev_teams.get(guild_id, {})
+        # ペア同チーム累積回数（なければ空）
+        pair_hist = self._pair_history.get(guild_id, {})
 
         # 分離ペアを (min_uid, max_uid) の集合として保持
         sep_pairs: FrozenSet[tuple] = cfg.separate_pairs
@@ -212,31 +231,30 @@ class SplitService:
                 if len(teams_simple[i]) < target_sizes[i]
             ]
 
-            # スコア: (分離ペア違反数, 前回同チーム人数, 総ランク値, 人数)
-            # → 分離ペア違反が少ないほど優先、次に前回チーム分散、次にランクバランス
-            p_prev = prev_teams.get(p.user_id)
+            # スコア: (分離ペア違反数, ペア累積同チーム数, 総ランク重み, 人数)
+            # → 分離ペア違反が少ない → ペア累積が少ない → ランクバランス の順で優先
             scored = []
             for i in candidates:
                 sep_violation = sum(
                     1 for pm in teams_simple[i]
                     if (min(p.user_id, pm.user_id), max(p.user_id, pm.user_id)) in sep_pairs
                 )
-                same_prev = (
-                    sum(1 for pm in teams_simple[i] if prev_teams.get(pm.user_id) == p_prev)
-                    if p_prev is not None else 0
+                pair_score = sum(
+                    pair_hist.get((min(p.user_id, pm.user_id), max(p.user_id, pm.user_id)), 0)
+                    for pm in teams_simple[i]
                 )
-                scored.append((sep_violation, same_prev, weights[i], len(teams_simple[i]), i))
+                scored.append((sep_violation, pair_score, weights[i], len(teams_simple[i]), i))
 
             min_sep = min(s for s, *_ in scored)
             if min_sep > 0:
                 # 全チームで分離違反が避けられない → 毎回違うペアになるようランダム割当
                 idx = random.choice(candidates)
             else:
-                after_sep = [(sp, w, sz, i) for s, sp, w, sz, i in scored if s == 0]
-                min_same = min(sp for sp, *_ in after_sep)
-                after_same = [(w, sz, i) for sp, w, sz, i in after_sep if sp == min_same]
-                min_weight = min(w for w, _, _ in after_same)
-                after_weight = [(sz, i) for w, sz, i in after_same if w == min_weight]
+                after_sep = [(ps, w, sz, i) for s, ps, w, sz, i in scored if s == 0]
+                min_pair = min(ps for ps, *_ in after_sep)
+                after_pair = [(w, sz, i) for ps, w, sz, i in after_sep if ps == min_pair]
+                min_weight = min(w for w, _, _ in after_pair)
+                after_weight = [(sz, i) for w, sz, i in after_pair if w == min_weight]
                 min_size = min(sz for sz, _ in after_weight)
                 best_indices = [i for sz, i in after_weight if sz == min_size]
                 idx = random.choice(best_indices)
