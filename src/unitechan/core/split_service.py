@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, FrozenSet, List, Optional
 from pathlib import Path
 import random
@@ -86,6 +86,7 @@ class TeamResult:
 @dataclass
 class SplitResult:
     teams: List[TeamResult]
+    spectators: List[Player] = field(default_factory=list)
 
 
 class SplitService:
@@ -183,6 +184,15 @@ class SplitService:
         team_count: int,
         dry_run: bool = False,
     ) -> SplitResult:
+
+        # 0) 11人以上の場合、超過分をランダムで観戦者に
+        max_players = team_count * 5
+        spectators: List[Player] = []
+        if len(players) > max_players:
+            pool = list(players)
+            random.shuffle(pool)
+            spectators = pool[max_players:]
+            players = pool[:max_players]
 
         # 1) バランス方式に応じてソート
         stats_records: dict = {}
@@ -351,7 +361,7 @@ class SplitService:
                 )
             team_results.append(TeamResult(arr, team_pokemon=team_pokemon_sets[tidx]))
 
-        return SplitResult(team_results)
+        return SplitResult(team_results, spectators=spectators)
 
     # =======================================================
     # ロール割当

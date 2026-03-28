@@ -140,6 +140,16 @@ class TeamSplit(commands.Cog):
                 inline=True,
             )
 
+        if result.spectators:
+            spec_names = [
+                names.get(p.user_id, f"ID:{p.user_id}") for p in result.spectators
+            ]
+            embed.add_field(
+                name=f"👀 観戦 — {len(result.spectators)}人",
+                value="  ".join(spec_names),
+                inline=False,
+            )
+
         if cfg.banned_pokemon:
             embed.add_field(
                 name="\u200b",
@@ -163,6 +173,8 @@ class TeamSplit(commands.Cog):
             for team in result.teams
             for mem in team.members
         }
+        for p in result.spectators:
+            names[p.user_id] = await self._resolve_name(interaction, p.user_id)
         return self._build_embed_from_result(result, mode, cfg, names)
 
     def _build_embed_guild(
@@ -178,6 +190,8 @@ class TeamSplit(commands.Cog):
             for team in result.teams
             for mem in team.members
         }
+        for p in result.spectators:
+            names[p.user_id] = self._resolve_name_guild(guild, p.user_id)
         return self._build_embed_from_result(result, mode, cfg, names)
 
     # -------------------------------------------------- 共通表示処理 --
