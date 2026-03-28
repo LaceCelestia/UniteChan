@@ -271,6 +271,12 @@ class SplitService:
         # 分離ペアを (min_uid, max_uid) の集合として保持
         sep_pairs: FrozenSet[tuple] = cfg.separate_pairs
 
+        # 分離ペアに含まれる人を先に処理する（チームが偏って詰まる前に配置するため）
+        if sep_pairs:
+            sep_uids = {uid for pair in sep_pairs for uid in pair}
+            base = [p for p in base if p.user_id in sep_uids] + \
+                   [p for p in base if p.user_id not in sep_uids]
+
         for p in base:
             candidates = [
                 i for i in range(team_count)
