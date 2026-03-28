@@ -160,6 +160,22 @@ class StatsStore:
         g = self._ensure_guild(guild_id)
         return dict(g.get('pair_history', {}))
 
+    def set_spectator_history(
+        self, guild_id: int, counts: Dict[int, int], last: List[int]
+    ) -> None:
+        """観戦回数と直前の観戦者リストを保存。"""
+        g = self._ensure_guild(guild_id)
+        g['spectator_counts'] = {str(uid): c for uid, c in counts.items()}
+        g['last_spectators'] = list(last)
+        self._save()
+
+    def get_spectator_history(self, guild_id: int) -> tuple:
+        """(counts: Dict[int,int], last_spectators: List[int]) を返す。"""
+        g = self._ensure_guild(guild_id)
+        counts = {int(uid): c for uid, c in g.get('spectator_counts', {}).items()}
+        last = [int(uid) for uid in g.get('last_spectators', [])]
+        return counts, last
+
     # ---- 戦績参照 ----
 
     def get_record(self, guild_id: int, user_id: int) -> Dict[str, int]:

@@ -101,6 +101,10 @@ class SplitService:
         self._prev_teams: Dict[int, Dict[int, int]] = {}
         # guild_id -> (min_uid, max_uid) -> 同チーム累積回数
         self._pair_history: Dict[int, Dict[tuple, int]] = {}
+        # guild_id -> user_id -> 観戦累積回数
+        self._spectator_counts: Dict[int, Dict[int, int]] = {}
+        # guild_id -> 直前の試合で観戦だった user_id の集合
+        self._last_spectators: Dict[int, set] = {}
 
     # =======================================================
     # 外部用API（/split run）
@@ -132,6 +136,11 @@ class SplitService:
                 for k, v in raw.items()
             }
 
+        if guild_id not in self._spectator_counts:
+            counts, last = store.get_spectator_history(guild_id)
+            self._spectator_counts[guild_id] = counts
+            self._last_spectators[guild_id] = set(last)
+
         cfg = get_store().get_split_config(guild_id)
         result = self.split_custom(guild_id, players, mode, cfg, team_count)
 
@@ -148,9 +157,18 @@ class SplitService:
                     key = (min(uid1, uid2), max(uid1, uid2))
                     pair_hist[key] = pair_hist.get(key, 0) + 1
 
+        # 観戦履歴を更新
+        spec_counts = self._spectator_counts.setdefault(guild_id, {})
+        for p in result.spectators:
+            spec_counts[p.user_id] = spec_counts.get(p.user_id, 0) + 1
+        self._last_spectators[guild_id] = {p.user_id for p in result.spectators}
+
         store.set_last_match(guild_id, team_uids)
         store.set_prev_match(guild_id, team_uids)
         store.set_pair_history(guild_id, {f"{k[0]}_{k[1]}": v for k, v in pair_hist.items()})
+        store.set_spectator_history(
+            guild_id, spec_counts, list(self._last_spectators[guild_id])
+        )
 
         # ロール履歴もディスクに永続化
         if guild_id in self._role_history:
@@ -185,14 +203,30 @@ class SplitService:
         dry_run: bool = False,
     ) -> SplitResult:
 
-        # 0) 11人以上の場合、超過分をランダムで観戦者に
+        # 0) 11人以上の場合、超過分を観戦者に（連続回避・観戦回数の少ない順で公平に選出）
         max_players = team_count * 5
         spectators: List[Player] = []
         if len(players) > max_players:
-            pool = list(players)
-            random.shuffle(pool)
-            spectators = pool[max_players:]
-            players = pool[:max_players]
+            n_spec = len(players) - max_players
+            spec_counts = self._spectator_counts.get(guild_id, {})
+            last_specs = self._last_spectators.get(guild_id, set())
+
+            # 直前に観戦した人は今回はプレイ優先（連続観戦NG）
+            can_spec = [p for p in players if p.user_id not in last_specs]
+            must_play = [p for p in players if p.user_id in last_specs]
+
+            if len(can_spec) < n_spec:
+                # 連続回避を満たせない場合はやむを得ずmust_playからも選ぶ
+                random.shuffle(must_play)
+                can_spec += must_play[:n_spec - len(can_spec)]
+                must_play = must_play[n_spec - len(can_spec) + len(must_play):]
+
+            # 観戦回数が少ない順に選ぶ（同数はランダム）
+            random.shuffle(can_spec)
+            can_spec.sort(key=lambda p: spec_counts.get(p.user_id, 0))
+            spectators = can_spec[:n_spec]
+            spec_set = {p.user_id for p in spectators}
+            players = [p for p in players if p.user_id not in spec_set]
 
         # 1) バランス方式に応じてソート
         stats_records: dict = {}
