@@ -53,8 +53,8 @@ class TeamSplit(commands.Cog):
         self._pending_votes: dict[int, int] = {}
         # 勝利メッセージID -> (guild_id, teams)。🔁 再戦用
         self._pending_rematch: dict[int, tuple[int, list[list[int]]]] = {}
-        # メッセージID -> (guild_id, teams)。/split prev の後から記録用
-        self._pending_direct_votes: dict[int, tuple[int, list[list[int]]]] = {}
+        # メッセージID -> (guild_id, teams, allow_rematch)。/split prev の後から記録用
+        self._pending_direct_votes: dict[int, tuple[int, list[list[int]], bool]] = {}
         # VC移動処理中のメッセージID（二重実行防止）
         self._moving: set[int] = set()
 
@@ -298,7 +298,7 @@ class TeamSplit(commands.Cog):
 
         # 🇦/🇧 後から記録（/split prev）
         if emoji in ('🇦', '🇧') and payload.message_id in self._pending_direct_votes:
-            guild_id, teams = self._pending_direct_votes.pop(payload.message_id)
+            guild_id, teams, allow_rematch = self._pending_direct_votes.pop(payload.message_id)
             winning_idx = 0 if emoji == '🇦' else 1
             store = get_stats_store()
             winners, losers = store.record_result_for_teams(guild_id, teams, winning_idx)
@@ -307,11 +307,14 @@ class TeamSplit(commands.Cog):
             team_label = 'Team A' if winning_idx == 0 else 'Team B'
             channel = self.bot.get_channel(payload.channel_id)
             if isinstance(channel, (discord.TextChannel, discord.Thread)):
-                msg = await channel.send(
-                    f'🏆 **{team_label}** の勝利を記録しました！　同じ組み合わせで再戦する場合は 🔁 を押してください。'
-                )
-                await msg.add_reaction('🔁')
-                self._pending_rematch[msg.id] = (guild_id, teams)
+                if allow_rematch:
+                    msg = await channel.send(
+                        f'🏆 **{team_label}** の勝利を記録しました！　同じ組み合わせで再戦する場合は 🔁 を押してください。'
+                    )
+                    await msg.add_reaction('🔁')
+                    self._pending_rematch[msg.id] = (guild_id, teams)
+                else:
+                    await channel.send(f'🏆 **{team_label}** の勝利を記録しました！')
             return
 
         if payload.message_id not in self._pending_votes:
@@ -520,7 +523,7 @@ class TeamSplit(commands.Cog):
             msg = await interaction.followup.send(embed=embed)
             await msg.add_reaction("🇦")
             await msg.add_reaction("🇧")
-            self._pending_direct_votes[msg.id] = (guild_id, teams)
+            self._pending_direct_votes[msg.id] = (guild_id, teams, i == 0)
 
     # -------------------------------------------------- /split move --
 
