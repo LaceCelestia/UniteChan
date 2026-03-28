@@ -51,6 +51,8 @@ class TeamSplit(commands.Cog):
         self.service = SplitService(self.lobby_store)
         # メッセージID -> guild_id。リアクション操作を待っているチーム分けメッセージを管理
         self._pending_votes: dict[int, int] = {}
+        # 勝利メッセージID -> (guild_id, teams)。🔁 再戦用
+        self._pending_rematch: dict[int, tuple[int, list[list[int]]]] = {}
 
     # /split グループ
     split = app_commands.Group(name="split", description="ユナイトチーム分けコマンド")
@@ -279,12 +281,20 @@ class TeamSplit(commands.Cog):
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
         """🇦/🇧/🎤/🔄 リアクションを処理する。"""
-        if payload.message_id not in self._pending_votes:
-            return
         if payload.user_id == self.bot.user.id:  # type: ignore[union-attr]
             return
 
         emoji = str(payload.emoji)
+
+        # 🔁 再戦（pending_votes とは独立して管理）
+        if emoji == '🔁' and payload.message_id in self._pending_rematch:
+            guild_id, teams = self._pending_rematch.pop(payload.message_id)
+            await self._reaction_rematch(payload, guild_id, teams)
+            return
+
+        if payload.message_id not in self._pending_votes:
+            return
+
         guild_id = self._pending_votes[payload.message_id]
         guild = self.bot.get_guild(guild_id)
         if guild is None:
@@ -293,13 +303,21 @@ class TeamSplit(commands.Cog):
         if emoji == '🇦' or emoji == '🇧':
             winning_idx = 0 if emoji == '🇦' else 1
             self._pending_votes.pop(payload.message_id)
-            winners, losers = get_stats_store().record_result(guild_id, winning_idx)
+            store = get_stats_store()
+            # 再戦用にチーム構成を保存してから記録
+            teams = store.get_last_match(guild_id)
+            winners, losers = store.record_result(guild_id, winning_idx)
             if not winners:
                 return
             team_label = 'Team A' if winning_idx == 0 else 'Team B'
             channel = self.bot.get_channel(payload.channel_id)
             if isinstance(channel, (discord.TextChannel, discord.Thread)):
-                await channel.send(f'🏆 **{team_label}** の勝利を記録しました！')
+                msg = await channel.send(
+                    f'🏆 **{team_label}** の勝利を記録しました！　同じ組み合わせで再戦する場合は 🔁 を押してください。'
+                )
+                await msg.add_reaction('🔁')
+                if teams:
+                    self._pending_rematch[msg.id] = (guild_id, teams)
 
         elif emoji == '🎙️':
             member = payload.member or guild.get_member(payload.user_id)
@@ -328,6 +346,38 @@ class TeamSplit(commands.Cog):
             return False
         p = member.guild_permissions
         return bool(p.administrator or p.manage_guild or p.manage_roles)
+
+    async def _reaction_rematch(
+        self,
+        payload: discord.RawReactionActionEvent,
+        guild_id: int,
+        teams: list[list[int]],
+    ) -> None:
+        """🔁 再戦: 同じ組み合わせで結果記録できるメッセージを送る。"""
+        channel = self.bot.get_channel(payload.channel_id)
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            return
+
+        get_stats_store().set_last_match(guild_id, teams)
+
+        guild = self.bot.get_guild(guild_id)
+        label_a = '  '.join(
+            self._resolve_name_guild(guild, uid) if guild else f'<@{uid}>'
+            for uid in teams[0]
+        )
+        label_b = '  '.join(
+            self._resolve_name_guild(guild, uid) if guild else f'<@{uid}>'
+            for uid in teams[1]
+        )
+        embed = discord.Embed(title='🔁 再戦', color=0xF1C40F)
+        embed.add_field(name='🟦 Team A', value=label_a or '(なし)', inline=True)
+        embed.add_field(name='🟥 Team B', value=label_b or '(なし)', inline=True)
+        embed.set_footer(text='🇦 / 🇧 で勝利チームを記録')
+
+        msg = await channel.send(embed=embed)
+        await msg.add_reaction('🇦')
+        await msg.add_reaction('🇧')
+        self._pending_votes[msg.id] = guild_id
 
     async def _reaction_move(
         self,
