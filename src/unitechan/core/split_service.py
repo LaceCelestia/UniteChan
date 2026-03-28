@@ -277,14 +277,15 @@ class SplitService:
             base = [p for p in base if p.user_id in sep_uids] + \
                    [p for p in base if p.user_id not in sep_uids]
 
+        # バランスモード有効時は重み差を優先、無効時はペア累積を優先
+        balance_active = mode.use_rank_balance or use_stats
+
         for p in base:
             candidates = [
                 i for i in range(team_count)
                 if len(teams_simple[i]) < target_sizes[i]
             ]
 
-            # スコア: (分離ペア違反数, ペア累積同チーム数, 総ランク重み, 人数)
-            # → 分離ペア違反が少ない → ペア累積が少ない → ランクバランス の順で優先
             scored = []
             for i in candidates:
                 sep_violation = sum(
@@ -295,20 +296,28 @@ class SplitService:
                     pair_hist.get((min(p.user_id, pm.user_id), max(p.user_id, pm.user_id)), 0)
                     for pm in teams_simple[i]
                 )
-                scored.append((sep_violation, pair_score, weights[i], len(teams_simple[i]), i))
+                scored.append((sep_violation, weights[i], pair_score, len(teams_simple[i]), i))
 
             min_sep = min(s for s, *_ in scored)
             if min_sep > 0:
                 # 全チームで分離違反が避けられない → 毎回違うペアになるようランダム割当
                 idx = random.choice(candidates)
             else:
-                after_sep = [(ps, w, sz, i) for s, ps, w, sz, i in scored if s == 0]
-                min_pair = min(ps for ps, *_ in after_sep)
-                after_pair = [(w, sz, i) for ps, w, sz, i in after_sep if ps == min_pair]
-                min_weight = min(w for w, _, _ in after_pair)
-                after_weight = [(sz, i) for w, sz, i in after_pair if w == min_weight]
-                min_size = min(sz for sz, _ in after_weight)
-                best_indices = [i for sz, i in after_weight if sz == min_size]
+                after_sep = [(w, ps, sz, i) for s, w, ps, sz, i in scored if s == 0]
+                if balance_active:
+                    # バランス優先: 重み差 → ペア累積 → 人数
+                    min_weight = min(w for w, *_ in after_sep)
+                    after_weight = [(ps, sz, i) for w, ps, sz, i in after_sep if w == min_weight]
+                    min_pair = min(ps for ps, *_ in after_weight)
+                    after_pair = [(sz, i) for ps, sz, i in after_weight if ps == min_pair]
+                else:
+                    # ランダム分け: ペア累積 → 重み差 → 人数
+                    min_pair = min(ps for _, ps, *_ in after_sep)
+                    after_pair_w = [(w, sz, i) for w, ps, sz, i in after_sep if ps == min_pair]
+                    min_weight = min(w for w, *_ in after_pair_w)
+                    after_pair = [(sz, i) for w, sz, i in after_pair_w if w == min_weight]
+                min_size = min(sz for sz, _ in after_pair)
+                best_indices = [i for sz, i in after_pair if sz == min_size]
                 idx = random.choice(best_indices)
 
             teams_simple[idx].append(p)
