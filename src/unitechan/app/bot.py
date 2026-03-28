@@ -17,6 +17,7 @@ _COGS = [
     'unitechan.app.cogs.config_commands',
     'unitechan.app.cogs.ban_commands',
     'unitechan.app.cogs.result_commands',
+    'unitechan.app.cogs.separate_commands',
 ]
 
 
