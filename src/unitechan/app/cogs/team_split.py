@@ -53,6 +53,8 @@ class TeamSplit(commands.Cog):
         self._pending_votes: dict[int, int] = {}
         # 勝利メッセージID -> (guild_id, teams)。🔁 再戦用
         self._pending_rematch: dict[int, tuple[int, list[list[int]]]] = {}
+        # メッセージID -> (guild_id, teams)。/split prev の後から記録用
+        self._pending_direct_votes: dict[int, tuple[int, list[list[int]]]] = {}
         # VC移動処理中のメッセージID（二重実行防止）
         self._moving: set[int] = set()
 
@@ -294,6 +296,24 @@ class TeamSplit(commands.Cog):
             await self._reaction_rematch(payload, guild_id, teams)
             return
 
+        # 🇦/🇧 後から記録（/split prev）
+        if emoji in ('🇦', '🇧') and payload.message_id in self._pending_direct_votes:
+            guild_id, teams = self._pending_direct_votes.pop(payload.message_id)
+            winning_idx = 0 if emoji == '🇦' else 1
+            store = get_stats_store()
+            winners, losers = store.record_result_for_teams(guild_id, teams, winning_idx)
+            if not winners:
+                return
+            team_label = 'Team A' if winning_idx == 0 else 'Team B'
+            channel = self.bot.get_channel(payload.channel_id)
+            if isinstance(channel, (discord.TextChannel, discord.Thread)):
+                msg = await channel.send(
+                    f'🏆 **{team_label}** の勝利を記録しました！　同じ組み合わせで再戦する場合は 🔁 を押してください。'
+                )
+                await msg.add_reaction('🔁')
+                self._pending_rematch[msg.id] = (guild_id, teams)
+            return
+
         if payload.message_id not in self._pending_votes:
             return
 
@@ -466,6 +486,40 @@ class TeamSplit(commands.Cog):
         except (discord.Forbidden, discord.NotFound, discord.HTTPException):
             pass
         # _pending_votes のエントリはそのまま（同じメッセージIDで継続）
+
+    # -------------------------------------------------- /split prev --
+
+    @split.command(name="prev", description="1つ前の試合の戦績を後から記録します")
+    async def split_prev(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("サーバー内で使ってね。", ephemeral=True)
+            return
+
+        guild_id = interaction.guild.id
+        teams = get_stats_store().get_prev_last_match(guild_id)
+        if not teams:
+            await interaction.response.send_message(
+                "1つ前の試合データがありません。", ephemeral=True
+            )
+            return
+
+        guild = interaction.guild
+        label_a = "  ".join(
+            self._resolve_name_guild(guild, uid) for uid in teams[0]
+        )
+        label_b = "  ".join(
+            self._resolve_name_guild(guild, uid) for uid in teams[1]
+        )
+        embed = discord.Embed(title="📋 前の試合の結果を記録", color=0x95A5A6)
+        embed.add_field(name="🟦 Team A", value=label_a or "(なし)", inline=True)
+        embed.add_field(name="🟥 Team B", value=label_b or "(なし)", inline=True)
+        embed.set_footer(text="🇦 / 🇧 で勝利チームを記録")
+
+        await interaction.response.send_message(embed=embed)
+        msg = await interaction.original_response()
+        await msg.add_reaction("🇦")
+        await msg.add_reaction("🇧")
+        self._pending_direct_votes[msg.id] = (guild_id, teams)
 
     # -------------------------------------------------- /split move --
 

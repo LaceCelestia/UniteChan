@@ -51,11 +51,18 @@ class StatsStore:
     def set_last_match(self, guild_id: int, teams: List[List[int]]) -> None:
         """チーム分け直後に呼び出す。teams = [[team_a_uids], [team_b_uids]]"""
         g = self._ensure_guild(guild_id)
+        # 上書き前の last_match を prev_last_match として保存（後から戦績入力用）
+        if 'last_match' in g:
+            g['prev_last_match'] = g['last_match']
         g['last_match'] = [list(team) for team in teams]
         self._save()
 
     def get_last_match(self, guild_id: int) -> Optional[List[List[int]]]:
         return self._ensure_guild(guild_id).get('last_match')
+
+    def get_prev_last_match(self, guild_id: int) -> Optional[List[List[int]]]:
+        """1つ前のチーム分け結果を返す。"""
+        return self._ensure_guild(guild_id).get('prev_last_match')
 
     def clear_last_match(self, guild_id: int) -> None:
         self._ensure_guild(guild_id).pop('last_match', None)
@@ -73,9 +80,25 @@ class StatsStore:
         last = g.get('last_match')
         if not last or winning_team_idx >= len(last):
             return [], []
+        winners, losers = self._apply_result(guild_id, last, winning_team_idx)
+        del self._ensure_guild(guild_id)['last_match']
+        self._save()
+        return winners, losers
 
-        winners = last[winning_team_idx]
-        losers = [uid for i, team in enumerate(last) for uid in team if i != winning_team_idx]
+    def record_result_for_teams(
+        self, guild_id: int, teams: List[List[int]], winning_team_idx: int
+    ) -> Tuple[List[int], List[int]]:
+        """チームを直接指定して戦績を更新（last_match を使わない）。"""
+        if not teams or winning_team_idx >= len(teams):
+            return [], []
+        return self._apply_result(guild_id, teams, winning_team_idx)
+
+    def _apply_result(
+        self, guild_id: int, teams: List[List[int]], winning_team_idx: int
+    ) -> Tuple[List[int], List[int]]:
+        g = self._ensure_guild(guild_id)
+        winners = teams[winning_team_idx]
+        losers = [uid for i, team in enumerate(teams) for uid in team if i != winning_team_idx]
 
         records = g.setdefault('records', {})
         for uid in winners:
@@ -94,7 +117,6 @@ class StatsStore:
             r = daily.setdefault(str(uid), {'wins': 0, 'losses': 0})
             r['losses'] += 1
 
-        del g['last_match']
         g['last_result'] = {'winners': winners, 'losers': losers, 'date': today}
         self._save()
         return winners, losers
