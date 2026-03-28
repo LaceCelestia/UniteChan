@@ -133,6 +133,33 @@ async def config_vc(
     )
 
 
+@config_group.command(name='start_announce', description='VC移動後にスタート時刻を告知する分数を設定します（0でOFF）★管理者専用')
+@app_commands.describe(minutes='VC移動から何分後にスタートか（0でOFF、最大60）')
+async def config_start_announce(
+    interaction: discord.Interaction,
+    minutes: app_commands.Range[int, 0, 60],
+) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
+        return
+
+    if not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
+        return
+    perms = interaction.user.guild_permissions
+    if not (perms.administrator or perms.manage_guild or perms.manage_roles):
+        await interaction.response.send_message('このコマンドは管理者のみ使用できます。', ephemeral=True)
+        return
+
+    get_store().set_start_announce(interaction.guild.id, minutes)
+    if minutes == 0:
+        await interaction.response.send_message('スタート告知を **OFF** にしました。', ephemeral=True)
+    else:
+        await interaction.response.send_message(
+            f'VC移動の **{minutes}分後** にスタート時刻を告知するよう設定しました。', ephemeral=True
+        )
+
+
 @config_group.command(name='reset', description='このサーバーの /split 関連設定をリセットします')
 async def config_reset(interaction: discord.Interaction) -> None:
     if interaction.guild is None:
@@ -158,6 +185,9 @@ async def config_show(interaction: discord.Interaction) -> None:
     ch_a = f'<#{ch_a_id}>' if ch_a_id else '未設定'
     ch_b = f'<#{ch_b_id}>' if ch_b_id else '未設定'
     lines.append(f'デフォルトVC: Team A={ch_a} / Team B={ch_b}')
+
+    ann = store.get_start_announce(guild_id)
+    lines.append(f'スタート告知: {"OFF" if ann == 0 else f"{ann}分後"}')
 
     await interaction.response.send_message('\n'.join(lines), ephemeral=True)
 

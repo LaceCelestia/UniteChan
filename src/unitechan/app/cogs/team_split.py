@@ -14,8 +14,12 @@ from unitechan.core.split_service import (
     ROLE_CODE,
     SplitResult,
 )
+from datetime import datetime, timezone, timedelta
+
 from unitechan.core.config_store import get_store
 from unitechan.core.stats_store import get_stats_store
+
+_JST = timezone(timedelta(hours=9))
 
 
 # /split test 用のデモプレイヤー（名前・ランク）
@@ -309,6 +313,16 @@ class TeamSplit(commands.Cog):
                 return
             await self._reaction_reroll(payload, guild, guild_id)
 
+    async def _send_start_announce(
+        self, channel: discord.TextChannel | discord.Thread, guild_id: int
+    ) -> None:
+        """設定に応じてスタート時刻を告知する。"""
+        minutes = get_store().get_start_announce(guild_id)
+        if minutes <= 0:
+            return
+        start_time = datetime.now(_JST) + timedelta(minutes=minutes)
+        await channel.send(f'⏰ **{start_time.strftime("%H:%M")}** スタートです！')
+
     def _is_admin_member(self, member: Optional[discord.Member]) -> bool:
         if member is None:
             return False
@@ -369,6 +383,7 @@ class TeamSplit(commands.Cog):
             embed.set_footer(text=f"VCに未参加のためスキップ: {', '.join(skipped)}")
 
         await channel.send(embed=embed)
+        await self._send_start_announce(channel, guild_id)
 
         # VC移動済みなのでリロール不可にする
         try:
@@ -487,6 +502,8 @@ class TeamSplit(commands.Cog):
             embed.set_footer(text=f"VCに未参加のためスキップ: {', '.join(skipped)}")
 
         await interaction.followup.send(embed=embed)
+        if isinstance(interaction.channel, (discord.TextChannel, discord.Thread)):
+            await self._send_start_announce(interaction.channel, interaction.guild.id)
 
 
 async def setup(bot: commands.Bot):

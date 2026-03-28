@@ -9,6 +9,8 @@ class SplitConfig:
     role_balance_targets: Dict[str, int]
     avoid_count: int
     banned_pokemon: FrozenSet[str] = field(default_factory=frozenset)
+    # 必ず別チームにするペア。各要素は (min_uid, max_uid) のタプル
+    separate_pairs: FrozenSet[tuple] = field(default_factory=frozenset)
 
 
 class ConfigStore:
@@ -57,10 +59,15 @@ class ConfigStore:
         }
         avoid_count = int(split.get('avoid', 0) or 0)
         banned_pokemon = frozenset(str(v) for v in g.get('banned_pokemon', []))
+        separate_pairs = frozenset(
+            (min(int(a), int(b)), max(int(a), int(b)))
+            for a, b in g.get('separate_pairs', [])
+        )
         return SplitConfig(
             role_balance_targets=role_balance_targets,
             avoid_count=avoid_count,
             banned_pokemon=banned_pokemon,
+            separate_pairs=separate_pairs,
         )
 
     def set_role_balance_targets(
@@ -154,6 +161,56 @@ class ConfigStore:
             g['banned_pokemon'] = []
             self._save()
         return count
+
+    # ---- 分離ペア ----
+
+    def _pair_key(self, uid1: int, uid2: int) -> tuple:
+        return (min(uid1, uid2), max(uid1, uid2))
+
+    def get_separate_pairs(self, guild_id: int) -> list:
+        return list(self._ensure_guild(guild_id).get('separate_pairs', []))
+
+    def add_separate_pair(self, guild_id: int, uid1: int, uid2: int) -> bool:
+        """True: 新規追加 / False: すでに登録済み"""
+        g = self._ensure_guild(guild_id)
+        pairs = [tuple(p) for p in g.get('separate_pairs', [])]
+        key = self._pair_key(uid1, uid2)
+        if key in pairs:
+            return False
+        pairs.append(list(key))
+        g['separate_pairs'] = pairs
+        self._save()
+        return True
+
+    def remove_separate_pair(self, guild_id: int, uid1: int, uid2: int) -> bool:
+        """True: 削除成功 / False: 登録されていない"""
+        g = self._ensure_guild(guild_id)
+        pairs = [tuple(p) for p in g.get('separate_pairs', [])]
+        key = self._pair_key(uid1, uid2)
+        if key not in pairs:
+            return False
+        pairs.remove(key)
+        g['separate_pairs'] = [list(p) for p in pairs]
+        self._save()
+        return True
+
+    def clear_separate_pairs(self, guild_id: int) -> int:
+        g = self._ensure_guild(guild_id)
+        count = len(g.get('separate_pairs', []))
+        if count:
+            g['separate_pairs'] = []
+            self._save()
+        return count
+
+    # ---- スタートアナウンス ----
+
+    def get_start_announce(self, guild_id: int) -> int:
+        """VC移動後に「XX:XX スタートです」を告知するまでの分数。0 = OFF。"""
+        return int(self._ensure_guild(guild_id).get('start_announce_minutes', 0))
+
+    def set_start_announce(self, guild_id: int, minutes: int) -> None:
+        self._ensure_guild(guild_id)['start_announce_minutes'] = max(0, int(minutes))
+        self._save()
 
     # ---- その他 ----
 
