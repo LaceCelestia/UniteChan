@@ -53,6 +53,8 @@ class TeamSplit(commands.Cog):
         self._pending_votes: dict[int, int] = {}
         # 勝利メッセージID -> (guild_id, teams)。🔁 再戦用
         self._pending_rematch: dict[int, tuple[int, list[list[int]]]] = {}
+        # VC移動処理中のメッセージID（二重実行防止）
+        self._moving: set[int] = set()
 
     # /split グループ
     split = app_commands.Group(name="split", description="ユナイトチーム分けコマンド")
@@ -323,7 +325,13 @@ class TeamSplit(commands.Cog):
             member = payload.member or guild.get_member(payload.user_id)
             if not self._is_admin_member(member):
                 return
-            await self._reaction_move(payload, guild, guild_id)
+            if payload.message_id in self._moving:
+                return
+            self._moving.add(payload.message_id)
+            try:
+                await self._reaction_move(payload, guild, guild_id)
+            finally:
+                self._moving.discard(payload.message_id)
 
         elif emoji == '🔄':
             member = payload.member or guild.get_member(payload.user_id)
@@ -435,10 +443,11 @@ class TeamSplit(commands.Cog):
         await channel.send(embed=embed)
         await self._send_start_announce(channel, guild_id)
 
-        # VC移動済みなのでリロール不可にする
+        # VC移動済みなのでリロール・再移動不可にする
         try:
             msg = await channel.fetch_message(payload.message_id)
             await msg.clear_reaction('🔄')
+            await msg.clear_reaction('🎙️')
         except (discord.Forbidden, discord.NotFound, discord.HTTPException):
             pass
 
