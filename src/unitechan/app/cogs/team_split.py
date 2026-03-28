@@ -414,33 +414,18 @@ class TeamSplit(commands.Cog):
             return
 
         vc_channels = [channel_a, channel_b]
-        team_labels = ["🅰 Team A", "🅱 Team B"]
-        moved: List[List[str]] = [[], []]
-        skipped: List[str] = []
 
         for tidx, uids in enumerate(last):
             for uid in uids:
                 m = guild.get_member(uid)
                 if m is None or m.voice is None:
-                    skipped.append(m.display_name if m else f"<@{uid}>")
                     continue
                 try:
                     await m.move_to(vc_channels[tidx])
-                    moved[tidx].append(m.display_name)
                 except (discord.Forbidden, discord.HTTPException):
-                    skipped.append(m.display_name)
+                    pass
 
-        embed = discord.Embed(title="🎙️ VC移動完了")
-        for tidx, names in enumerate(moved):
-            embed.add_field(
-                name=f"{team_labels[tidx]} → {vc_channels[tidx].name}（{len(names)}人）",
-                value="\n".join(f"・{n}" for n in names) if names else "(移動なし)",
-                inline=True,
-            )
-        if skipped:
-            embed.set_footer(text=f"VCに未参加のためスキップ: {', '.join(skipped)}")
-
-        await channel.send(embed=embed)
+        await channel.send('🎙️ VC移動完了')
         await self._send_start_announce(channel, guild_id)
 
         # VC移動済みなのでリロール・再移動不可にする
@@ -533,34 +518,18 @@ class TeamSplit(commands.Cog):
         await interaction.response.defer()
 
         channels = [channel_a, channel_b]
-        team_labels = ["🅰 Team A", "🅱 Team B"]
-        moved: List[List[str]] = [[], []]
-        skipped: List[str] = []
 
         for tidx, uids in enumerate(last):
             for uid in uids:
                 member = interaction.guild.get_member(uid)
                 if member is None or member.voice is None:
-                    name = member.display_name if member else f"<@{uid}>"
-                    skipped.append(name)
                     continue
                 try:
                     await member.move_to(channels[tidx])
-                    moved[tidx].append(member.display_name)
                 except (discord.Forbidden, discord.HTTPException):
-                    skipped.append(member.display_name)
+                    pass
 
-        embed = discord.Embed(title="🎙️ VC移動完了")
-        for tidx, names in enumerate(moved):
-            embed.add_field(
-                name=f"{team_labels[tidx]} → {channels[tidx].name}（{len(names)}人）",
-                value="\n".join(f"・{n}" for n in names) if names else "(移動なし)",
-                inline=True,
-            )
-        if skipped:
-            embed.set_footer(text=f"VCに未参加のためスキップ: {', '.join(skipped)}")
-
-        await interaction.followup.send(embed=embed)
+        await interaction.followup.send('🎙️ VC移動完了')
         if isinstance(interaction.channel, (discord.TextChannel, discord.Thread)):
             await self._send_start_announce(interaction.channel, interaction.guild.id)
 
