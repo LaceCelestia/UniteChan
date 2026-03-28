@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import io
+import json
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 
 import discord
@@ -9,6 +12,8 @@ from discord.ext import commands
 from unitechan.core.stats_store import get_stats_store
 from unitechan.core.lobby_store import LobbyStore
 from unitechan.app.cogs._utils import is_admin
+
+_JST = timezone(timedelta(hours=9))
 
 
 async def _resolve_name(guild: discord.Guild, uid: int) -> str:
@@ -178,6 +183,62 @@ class ResultCommands(commands.Cog):
             await interaction.response.send_message('リセットする戦績がありません。', ephemeral=True)
             return
         await interaction.response.send_message(f'✅ {count}人分の戦績をリセットしました。', ephemeral=True)
+
+    @stats.command(name='export', description='戦績データをJSONファイルでエクスポートします')
+    async def stats_export(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
+            return
+
+        data = get_stats_store().export_stats(interaction.guild.id)
+        if not data['records']:
+            await interaction.response.send_message('エクスポートする戦績がありません。', ephemeral=True)
+            return
+
+        json_bytes = json.dumps(data, ensure_ascii=False, indent=2).encode('utf-8')
+        date_str = datetime.now(_JST).strftime('%Y%m%d')
+        filename = f'stats_{interaction.guild.id}_{date_str}.json'
+        await interaction.response.send_message(
+            '📤 戦績データをエクスポートしました。',
+            file=discord.File(io.BytesIO(json_bytes), filename=filename),
+        )
+
+    @stats.command(name='import', description='戦績データをJSONファイルからインポート・マージします（管理者専用）')
+    @app_commands.describe(file='エクスポートしたJSONファイル')
+    async def stats_import(
+        self,
+        interaction: discord.Interaction,
+        file: discord.Attachment,
+    ) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
+            return
+        if not is_admin(interaction):
+            await interaction.response.send_message('このコマンドは管理者のみ使用できます。', ephemeral=True)
+            return
+        if not file.filename.endswith('.json'):
+            await interaction.response.send_message('JSONファイルを添付してください。', ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            raw = await file.read()
+            data = json.loads(raw.decode('utf-8'))
+            result = get_stats_store().merge_stats(interaction.guild.id, data)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            await interaction.followup.send('ファイルの読み込みに失敗しました。正しいJSONファイルか確認してください。', ephemeral=True)
+            return
+        except ValueError as e:
+            await interaction.followup.send(str(e), ephemeral=True)
+            return
+
+        players = len(data.get('records', {}))
+        await interaction.followup.send(
+            f'✅ {players}人分の戦績をマージしました。'
+            f'（+{result["added_wins"]}勝 / +{result["added_losses"]}敗）',
+            ephemeral=True,
+        )
 
 
 async def setup(bot: commands.Bot) -> None:

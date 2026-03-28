@@ -180,6 +180,48 @@ class StatsStore:
         g = self._ensure_guild(guild_id)
         return {int(uid): dict(r) for uid, r in g.get('records', {}).items()}
 
+    def export_stats(self, guild_id: int) -> dict:
+        """戦績データをエクスポート用dictで返す。"""
+        g = self._ensure_guild(guild_id)
+        return {
+            'version': 1,
+            'records': {uid: dict(r) for uid, r in g.get('records', {}).items()},
+            'daily_records': {
+                date: {uid: dict(r) for uid, r in day.items()}
+                for date, day in g.get('daily_records', {}).items()
+            },
+        }
+
+    def merge_stats(self, guild_id: int, data: dict) -> Dict[str, int]:
+        """エクスポートデータをマージする。追加した勝数・負数の合計を返す。"""
+        if data.get('version') != 1:
+            raise ValueError('対応していないフォーマットです。')
+
+        g = self._ensure_guild(guild_id)
+        added_wins = 0
+        added_losses = 0
+
+        # 通算戦績マージ
+        records = g.setdefault('records', {})
+        for uid, r in data.get('records', {}).items():
+            existing = records.setdefault(uid, {'wins': 0, 'losses': 0})
+            existing['wins'] += r.get('wins', 0)
+            existing['losses'] += r.get('losses', 0)
+            added_wins += r.get('wins', 0)
+            added_losses += r.get('losses', 0)
+
+        # 日次戦績マージ
+        daily_records = g.setdefault('daily_records', {})
+        for date, day in data.get('daily_records', {}).items():
+            daily_day = daily_records.setdefault(date, {})
+            for uid, r in day.items():
+                existing = daily_day.setdefault(uid, {'wins': 0, 'losses': 0})
+                existing['wins'] += r.get('wins', 0)
+                existing['losses'] += r.get('losses', 0)
+
+        self._save()
+        return {'added_wins': added_wins, 'added_losses': added_losses}
+
     def reset_stats(self, guild_id: int) -> int:
         """戦績をリセット。削除したプレイヤー数を返す。"""
         g = self._ensure_guild(guild_id)
