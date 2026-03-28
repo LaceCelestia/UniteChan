@@ -489,37 +489,38 @@ class TeamSplit(commands.Cog):
 
     # -------------------------------------------------- /split prev --
 
-    @split.command(name="prev", description="1つ前の試合の戦績を後から記録します")
+    @split.command(name="prev", description="過去の試合の戦績を後から記録します（最大5件）")
     async def split_prev(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
             await interaction.response.send_message("サーバー内で使ってね。", ephemeral=True)
             return
 
         guild_id = interaction.guild.id
-        teams = get_stats_store().get_prev_last_match(guild_id)
-        if not teams:
+        history = get_stats_store().get_match_history(guild_id)
+        if not history:
             await interaction.response.send_message(
-                "1つ前の試合データがありません。", ephemeral=True
+                "過去の試合データがありません。", ephemeral=True
             )
             return
 
         guild = interaction.guild
-        label_a = "  ".join(
-            self._resolve_name_guild(guild, uid) for uid in teams[0]
-        )
-        label_b = "  ".join(
-            self._resolve_name_guild(guild, uid) for uid in teams[1]
-        )
-        embed = discord.Embed(title="📋 前の試合の結果を記録", color=0x95A5A6)
-        embed.add_field(name="🟦 Team A", value=label_a or "(なし)", inline=True)
-        embed.add_field(name="🟥 Team B", value=label_b or "(なし)", inline=True)
-        embed.set_footer(text="🇦 / 🇧 で勝利チームを記録")
+        await interaction.response.defer()
 
-        await interaction.response.send_message(embed=embed)
-        msg = await interaction.original_response()
-        await msg.add_reaction("🇦")
-        await msg.add_reaction("🇧")
-        self._pending_direct_votes[msg.id] = (guild_id, teams)
+        for i, teams in enumerate(history):
+            label_a = "  ".join(self._resolve_name_guild(guild, uid) for uid in teams[0])
+            label_b = "  ".join(self._resolve_name_guild(guild, uid) for uid in teams[1])
+            embed = discord.Embed(
+                title=f"📋 {i + 1}試合前の結果を記録",
+                color=0x95A5A6,
+            )
+            embed.add_field(name="🟦 Team A", value=label_a or "(なし)", inline=True)
+            embed.add_field(name="🟥 Team B", value=label_b or "(なし)", inline=True)
+            embed.set_footer(text="🇦 / 🇧 で勝利チームを記録")
+
+            msg = await interaction.followup.send(embed=embed)
+            await msg.add_reaction("🇦")
+            await msg.add_reaction("🇧")
+            self._pending_direct_votes[msg.id] = (guild_id, teams)
 
     # -------------------------------------------------- /split move --
 

@@ -48,21 +48,26 @@ class StatsStore:
 
     # ---- 直前の試合 ----
 
+    _MATCH_HISTORY_MAX = 5
+
     def set_last_match(self, guild_id: int, teams: List[List[int]]) -> None:
         """チーム分け直後に呼び出す。teams = [[team_a_uids], [team_b_uids]]"""
         g = self._ensure_guild(guild_id)
-        # 上書き前の last_match を prev_last_match として保存（後から戦績入力用）
+        # 上書き前の last_match を履歴に積む
         if 'last_match' in g:
-            g['prev_last_match'] = g['last_match']
+            hist = g.setdefault('match_history', [])
+            hist.insert(0, g['last_match'])
+            if len(hist) > self._MATCH_HISTORY_MAX:
+                del hist[self._MATCH_HISTORY_MAX:]
         g['last_match'] = [list(team) for team in teams]
         self._save()
 
     def get_last_match(self, guild_id: int) -> Optional[List[List[int]]]:
         return self._ensure_guild(guild_id).get('last_match')
 
-    def get_prev_last_match(self, guild_id: int) -> Optional[List[List[int]]]:
-        """1つ前のチーム分け結果を返す。"""
-        return self._ensure_guild(guild_id).get('prev_last_match')
+    def get_match_history(self, guild_id: int) -> List[List[List[int]]]:
+        """過去の試合履歴を新しい順で返す（最大 _MATCH_HISTORY_MAX 件）。"""
+        return list(self._ensure_guild(guild_id).get('match_history', []))
 
     def clear_last_match(self, guild_id: int) -> None:
         self._ensure_guild(guild_id).pop('last_match', None)
