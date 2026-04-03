@@ -246,6 +246,7 @@ class TeamSplit(commands.Cog):
             await interaction.response.send_message(str(e), ephemeral=True)
             return
 
+        await interaction.response.defer()
         msg = await self._display(interaction, result, m, cfg, resolve_names=True)
         for emoji in _REACTION_EMOJIS:
             await msg.add_reaction(emoji)
