@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from typing import List, Optional
 
 import discord
@@ -490,6 +491,43 @@ class TeamSplit(commands.Cog):
         except (discord.Forbidden, discord.NotFound, discord.HTTPException):
             pass
         # _pending_votes のエントリはそのまま（同じメッセージIDで継続）
+
+    # -------------------------------------------------- /split roles --
+
+    @split.command(name="roles", description="チーム構成はそのままロールだけ振り直します")
+    async def split_roles(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("サーバー内で使ってね。", ephemeral=True)
+            return
+
+        guild_id = interaction.guild.id
+        last = get_stats_store().get_last_match(guild_id)
+        if not last:
+            await interaction.response.send_message(
+                "チーム分け結果がありません。先に `/split run` を実行してください。", ephemeral=True
+            )
+            return
+
+        cfg = get_store().get_split_config(guild_id)
+        mode = SplitMode(get_store().get_split_code(guild_id))
+        guild = interaction.guild
+
+        embed = discord.Embed(title="🎲 ロール振り直し", color=0x3498DB)
+        for tidx, uids in enumerate(last):
+            roles = self.service._assign_roles_for_team(len(uids), mode, cfg)
+            random.shuffle(roles)
+            lines = []
+            for uid, role in zip(uids, roles):
+                name = self._resolve_name_guild(guild, uid)
+                code = ROLE_CODE.get(role, role[:3].upper())
+                lines.append(f"`{code}` {name}")
+            embed.add_field(
+                name=TEAM_LABELS[tidx],
+                value="\n".join(lines) if lines else "(なし)",
+                inline=True,
+            )
+
+        await interaction.response.send_message(embed=embed)
 
     # -------------------------------------------------- /split prev --
 
