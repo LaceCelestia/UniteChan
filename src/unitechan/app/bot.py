@@ -43,8 +43,9 @@ def create_bot() -> UniteChanBot:
     @bot.tree.command(name='sync', description='このサーバーのスラッシュコマンドを再同期します(管理者専用)')
     @app_commands.checks.has_permissions(administrator=True)
     async def sync_commands(interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
         synced = await bot.tree.sync(guild=interaction.guild)
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f'このサーバーのコマンドを再同期しました。\n{len(synced)} 個のコマンドを更新しました。',
             ephemeral=True,
         )
