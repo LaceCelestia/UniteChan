@@ -108,8 +108,8 @@ class TeamSplit(commands.Cog):
         dup = "許可" if mode.allow_cross_dup else "禁止"
         avoid = f"{cfg.avoid_count}回" if mode.use_avoid and cfg.avoid_count > 0 else "OFF"
         return (
-            f"{mode.mode_raw}  バランス:{rank} / ポケモン:{pokemon} / "
-            f"ロール:{role} / 重複:{dup} / 連続回避:{avoid}"
+            f"{mode.mode_raw}  バランス:{rank} / ロール:{role} / "
+            f"ポケモン:{pokemon} / 連続回避:{avoid} / 重複:{dup}"
         )
 
     # -------------------------------------------------- Embed生成 --
