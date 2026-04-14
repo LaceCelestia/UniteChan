@@ -4,7 +4,7 @@
 
 - Repository: `https://github.com/LaceCelestia/UniteChan`
 - Releases: `https://github.com/LaceCelestia/UniteChan/releases`
-- Package version: `0.1.1`
+- Package version: `0.2.0`
 
 ## 主な機能
 
