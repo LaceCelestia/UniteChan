@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import List, Optional
 
 import discord
@@ -20,6 +21,14 @@ from unitechan.core.config_store import get_store
 from unitechan.core.stats_store import get_stats_store
 
 _JST = timezone(timedelta(hours=9))
+_TRANSIENT_NOTICE_SECONDS = 15
+ROLE_BADGES = {
+    "ATK": "🟥ATK",
+    "ALL": "🟪ALL",
+    "SPD": "🟦SPD",
+    "DEF": "🟩DEF",
+    "SUP": "🟨SUP",
+}
 
 
 # /split test 用のデモプレイヤー（名前・ランク）
@@ -42,6 +51,19 @@ NUMS = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩"]
 TEAM_LABELS = ["🟦 Team A", "🟥 Team B"]
 
 
+def _role_label(role_key: str) -> str:
+    code = ROLE_CODE.get(role_key, role_key[:3].upper())
+    return ROLE_BADGES.get(code, code)
+
+
+@dataclass
+class PendingSplitMessage:
+    guild_id: int
+    teams: list[list[int]]
+    mode_code: str | None = None
+    allow_controls: bool = False
+
+
 class TeamSplit(commands.Cog):
     """ユナイトのチーム分け"""
 
@@ -49,8 +71,8 @@ class TeamSplit(commands.Cog):
         self.bot = bot
         self.lobby_store = LobbyStore()
         self.service = SplitService(self.lobby_store)
-        # メッセージID -> guild_id。リアクション操作を待っているチーム分けメッセージを管理
-        self._pending_votes: dict[int, int] = {}
+        # メッセージID -> チーム分けメッセージの状態。リアクション操作対象をメッセージ単位で管理する
+        self._pending_votes: dict[int, PendingSplitMessage] = {}
         # 勝利メッセージID -> (guild_id, teams)。🔁 再戦用
         self._pending_rematch: dict[int, tuple[int, list[list[int]]]] = {}
         # メッセージID -> (guild_id, teams, allow_rematch)。/split prev の後から記録用
@@ -131,15 +153,16 @@ class TeamSplit(commands.Cog):
                 num = NUMS[i] if i < len(NUMS) else f"{i + 1}."
                 name = names.get(mem.user_id, f"ID:{mem.user_id}")
                 if mem.pokemon:
-                    code = ROLE_CODE.get(mem.role, mem.role[:3].upper())
-                    lines.append(f"{num} {name}  `{code}` {mem.pokemon}")
+                    lines.append(f"{num} {name}  **{_role_label(mem.role)}** {mem.pokemon}")
+                elif mode.role_balance_mode != 0:
+                    lines.append(f"{num} {name}  **{_role_label(mem.role)}**")
                 else:
                     lines.append(f"{num} {name}")
 
             if team.team_pokemon:
                 lines.append("")
                 poke_parts = [
-                    f"`{ROLE_CODE.get(r, r[:3].upper())}` {p}"
+                    f"**{_role_label(r)}** {p}"
                     for r, p in team.team_pokemon
                 ]
                 lines.append("🎮 " + "  ".join(poke_parts))
@@ -254,9 +277,15 @@ class TeamSplit(commands.Cog):
 
         await interaction.response.defer()
         msg = await self._display(interaction, result, m, cfg, resolve_names=True)
+        teams = [[mem.user_id for mem in team.members] for team in result.teams]
         for emoji in _REACTION_EMOJIS:
             await msg.add_reaction(emoji)
-        self._pending_votes[msg.id] = guild_id
+        self._pending_votes[msg.id] = PendingSplitMessage(
+            guild_id=guild_id,
+            teams=teams,
+            mode_code=m.mode_raw,
+            allow_controls=True,
+        )
 
     # -------------------------------------------------- /split test --
 
@@ -321,13 +350,17 @@ class TeamSplit(commands.Cog):
                     await msg.add_reaction('🔁')
                     self._pending_rematch[msg.id] = (guild_id, teams)
                 else:
-                    await channel.send(f'🏆 **{team_label}** の勝利を記録しました！')
+                    await self._send_transient_notice(
+                        channel,
+                        f'🏆 **{team_label}** の勝利を記録しました！',
+                    )
             return
 
         if payload.message_id not in self._pending_votes:
             return
 
-        guild_id = self._pending_votes[payload.message_id]
+        pending = self._pending_votes[payload.message_id]
+        guild_id = pending.guild_id
         guild = self.bot.get_guild(guild_id)
         if guild is None:
             return
@@ -336,11 +369,12 @@ class TeamSplit(commands.Cog):
             winning_idx = 0 if emoji == '🇦' else 1
             self._pending_votes.pop(payload.message_id)
             store = get_stats_store()
-            # 再戦用にチーム構成を保存してから記録
-            teams = store.get_last_match(guild_id)
-            winners, losers = store.record_result(guild_id, winning_idx)
+            teams = [list(team) for team in pending.teams]
+            winners, losers = store.record_result_for_teams(guild_id, teams, winning_idx)
             if not winners:
                 return
+            if store.get_last_match(guild_id) == teams:
+                store.clear_last_match(guild_id)
             team_label = 'Team A' if winning_idx == 0 else 'Team B'
             channel = self.bot.get_channel(payload.channel_id)
             if isinstance(channel, (discord.TextChannel, discord.Thread)):
@@ -348,10 +382,11 @@ class TeamSplit(commands.Cog):
                     f'🏆 **{team_label}** の勝利を記録しました！　同じ組み合わせで再戦する場合は 🔁 を押してください。'
                 )
                 await msg.add_reaction('🔁')
-                if teams:
-                    self._pending_rematch[msg.id] = (guild_id, teams)
+                self._pending_rematch[msg.id] = (guild_id, teams)
 
         elif emoji == '🎙️':
+            if not pending.allow_controls:
+                return
             member = payload.member or guild.get_member(payload.user_id)
             if not self._is_admin_member(member):
                 return
@@ -359,15 +394,17 @@ class TeamSplit(commands.Cog):
                 return
             self._moving.add(payload.message_id)
             try:
-                await self._reaction_move(payload, guild, guild_id)
+                await self._reaction_move(payload, guild, pending.teams)
             finally:
                 self._moving.discard(payload.message_id)
 
         elif emoji == '🔄':
+            if not pending.allow_controls or pending.mode_code is None:
+                return
             member = payload.member or guild.get_member(payload.user_id)
             if not self._is_admin_member(member):
                 return
-            await self._reaction_reroll(payload, guild, guild_id)
+            await self._reaction_reroll(payload, guild, pending)
 
     async def _send_start_announce(
         self, channel: discord.TextChannel | discord.Thread, guild_id: int
@@ -377,7 +414,18 @@ class TeamSplit(commands.Cog):
         if minutes <= 0:
             return
         start_time = datetime.now(_JST) + timedelta(minutes=minutes)
-        await channel.send(f'⏰ **{start_time.strftime("%H:%M")}** スタートです！')
+        delete_after = (minutes + 5) * 60
+        await channel.send(
+            f'⏰ **{start_time.strftime("%H:%M")}** スタートです！',
+            delete_after=delete_after,
+        )
+
+    async def _send_transient_notice(
+        self,
+        channel: discord.TextChannel | discord.Thread,
+        content: str,
+    ) -> None:
+        await channel.send(content, delete_after=_TRANSIENT_NOTICE_SECONDS)
 
     def _is_admin_member(self, member: Optional[discord.Member]) -> bool:
         if member is None:
@@ -415,18 +463,23 @@ class TeamSplit(commands.Cog):
         msg = await channel.send(embed=embed)
         await msg.add_reaction('🇦')
         await msg.add_reaction('🇧')
-        self._pending_votes[msg.id] = guild_id
+        self._pending_votes[msg.id] = PendingSplitMessage(
+            guild_id=guild_id,
+            teams=[list(team) for team in teams],
+        )
 
     async def _reaction_move(
         self,
         payload: discord.RawReactionActionEvent,
         guild: discord.Guild,
-        guild_id: int,
+        teams: list[list[int]],
     ) -> None:
         """🎤 リアクション: チーム分け結果に従ってVCを移動する。"""
         channel = self.bot.get_channel(payload.channel_id)
         if not isinstance(channel, (discord.TextChannel, discord.Thread)):
             return
+
+        guild_id = guild.id
 
         cfg_a_id, cfg_b_id = get_store().get_vc_channels(guild_id)
         channel_a = guild.get_channel(cfg_a_id) if cfg_a_id else None
@@ -438,14 +491,9 @@ class TeamSplit(commands.Cog):
             )
             return
 
-        last = get_stats_store().get_last_match(guild_id)
-        if not last:
-            await channel.send('チーム分け結果がありません。先に `/split run` を実行してください。')
-            return
-
         vc_channels = [channel_a, channel_b]
 
-        for tidx, uids in enumerate(last):
+        for tidx, uids in enumerate(teams):
             for uid in uids:
                 m = guild.get_member(uid)
                 if m is None or m.voice is None:
@@ -455,7 +503,7 @@ class TeamSplit(commands.Cog):
                 except (discord.Forbidden, discord.HTTPException):
                     pass
 
-        await channel.send('🎙️ VC移動完了')
+        await self._send_transient_notice(channel, '🎙️ VC移動完了')
         await self._send_start_announce(channel, guild_id)
 
         # VC移動済みなのでリロール・再移動不可にする
@@ -470,17 +518,19 @@ class TeamSplit(commands.Cog):
         self,
         payload: discord.RawReactionActionEvent,
         guild: discord.Guild,
-        guild_id: int,
+        pending: PendingSplitMessage,
     ) -> None:
         """🔄 リアクション: 同じ設定でリロールしてメッセージを編集する。"""
+        guild_id = pending.guild_id
         cfg = get_store().get_split_config(guild_id)
-        mode = SplitMode(get_store().get_split_code(guild_id))
+        mode = SplitMode(pending.mode_code)
 
         try:
             result = self.service.split(guild_id, mode)
         except ValueError:
             return
 
+        pending.teams = [[mem.user_id for mem in team.members] for team in result.teams]
         embed = self._build_embed_guild(guild, result, mode, cfg)
 
         channel = self.bot.get_channel(payload.channel_id)

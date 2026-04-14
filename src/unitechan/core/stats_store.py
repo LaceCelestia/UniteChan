@@ -122,7 +122,12 @@ class StatsStore:
             r = daily.setdefault(str(uid), {'wins': 0, 'losses': 0})
             r['losses'] += 1
 
-        g['last_result'] = {'winners': winners, 'losers': losers, 'date': today}
+        g['last_result'] = {
+            'winners': list(winners),
+            'losers': list(losers),
+            'teams': [list(team) for team in teams],
+            'date': today,
+        }
         self._save()
         return winners, losers
 
@@ -154,8 +159,40 @@ class StatsStore:
             if r:
                 r['losses'] = max(0, r['losses'] - 1)
 
+        teams = last.get('teams')
+        if 'last_match' not in g and isinstance(teams, list):
+            restored = [list(team) for team in teams if isinstance(team, list)]
+            if restored:
+                g['last_match'] = restored
+
         self._save()
         return True
+
+    def get_last_result(self, guild_id: int) -> Optional[dict]:
+        last = self._ensure_guild(guild_id).get('last_result')
+        if not isinstance(last, dict):
+            return None
+        return {
+            'winners': list(last.get('winners', [])),
+            'losers': list(last.get('losers', [])),
+            'teams': [list(team) for team in last.get('teams', []) if isinstance(team, list)],
+            'date': last.get('date'),
+        }
+
+    def undo_last_result_if_matches(
+        self,
+        guild_id: int,
+        winners: List[int],
+        losers: List[int],
+    ) -> bool:
+        last = self.get_last_result(guild_id)
+        if not last:
+            return False
+        if sorted(last.get('winners', [])) != sorted(winners):
+            return False
+        if sorted(last.get('losers', [])) != sorted(losers):
+            return False
+        return self.undo_last_result(guild_id)
 
     # ---- チーム履歴・ロール履歴（チーム分け品質向上用） ----
 

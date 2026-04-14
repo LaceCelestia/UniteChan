@@ -31,8 +31,16 @@ async def config_split_code(interaction: discord.Interaction, code: str) -> None
         return
 
     get_store().set_split_code(interaction.guild.id, code)
+    refreshed = 0
+    gui_cog = interaction.client.get_cog('GuiMode')
+    if gui_cog is not None and hasattr(gui_cog, 'refresh_guild_panels'):
+        refreshed = await gui_cog.refresh_guild_panels(interaction.guild)
+
+    extra = ''
+    if refreshed > 0:
+        extra = f'\nGUIパネル {refreshed} 件にも反映しました。'
     await interaction.response.send_message(
-        f'チーム分けコードを **{code}** に設定しました。\n`/split run` で使用されます。',
+        f'チーム分けコードを **{code}** に設定しました。\n`/split run` と `/guimode` で使用されます。{extra}',
         ephemeral=True,
     )
 

@@ -144,6 +144,7 @@ python -m unitechan.app.bot
 | `/split test [モード]` | デモデータでチーム分けをテスト ★ |
 | `/split move [channel_a] [channel_b]` | チーム分け結果に従いVCにメンバーを移動 ★ |
 | `/split prev` | 過去5試合分の戦績を後から記録（各メッセージに 🇦/🇧） |
+| `/guimode [code]` | ボタンUIで Team A / Team B / 観戦 / VC移動 / 勝敗記録 を操作するパネルを作成 ★ |
 
 > **`/split run` 後のリアクション操作**
 >
@@ -257,6 +258,8 @@ python -m unitechan.app.bot
 2. **チーム分け** — `/split run` でチーム分けを実行
 3. **VC移動** — 🎙️ リアクション（または `/split move`）で Team A / Team B のVCに自動振り分け
 4. **結果記録** — 試合後に 🇦 または 🇧 をリアクションで押して戦績を記録
+
+`/guimode` を使うと、同じ流れをボタンUIでまとめて操作できます。Team A / Team B / 観戦 / 離脱 は参加者全員、ロビー同期 / 自動分け / VC移動 / 勝敗記録 は管理者が操作します。
 
 ### スタート告知
 

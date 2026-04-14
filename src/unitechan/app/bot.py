@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 _COGS = [
     'unitechan.app.cogs.team_split',
+    'unitechan.app.cogs.gui_mode',
     'unitechan.app.cogs.lobby',
     'unitechan.app.cogs.config_commands',
     'unitechan.app.cogs.ban_commands',
@@ -23,11 +24,20 @@ _COGS = [
 
 class UniteChanBot(commands.Bot):
     async def setup_hook(self) -> None:
+        failed: list[str] = []
         for cog in _COGS:
             try:
                 await self.load_extension(cog)
             except Exception as exc:
+                failed.append(cog)
                 logger.exception('failed to load %s: %s', cog, exc)
+        if failed:
+            logger.error(
+                'skip command sync because %d extension(s) failed to load: %s',
+                len(failed),
+                ', '.join(failed),
+            )
+            return
         await self.tree.sync()
 
     async def on_ready(self) -> None:

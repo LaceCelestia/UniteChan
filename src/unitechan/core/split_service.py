@@ -106,6 +106,35 @@ class SplitService:
         # guild_id -> 直前の試合で観戦だった user_id の集合
         self._last_spectators: Dict[int, set] = {}
 
+    def _ensure_history_cache(self, guild_id: int) -> None:
+        store = get_stats_store()
+
+        if guild_id not in self._prev_teams:
+            prev = store.get_prev_match(guild_id)
+            self._prev_teams[guild_id] = (
+                {uid: tidx for tidx, uids in enumerate(prev) for uid in uids}
+                if prev else
+                {}
+            )
+
+        if guild_id not in self._pair_history:
+            raw = store.get_pair_history(guild_id)
+            self._pair_history[guild_id] = {
+                (int(k.split('_')[0]), int(k.split('_')[1])): v
+                for k, v in raw.items()
+            }
+
+        if guild_id not in self._spectator_counts:
+            counts, last = store.get_spectator_history(guild_id)
+            self._spectator_counts[guild_id] = counts
+            self._last_spectators[guild_id] = set(last)
+        elif guild_id not in self._last_spectators:
+            self._last_spectators[guild_id] = set()
+
+        if guild_id not in self._role_history:
+            stored = store.get_role_history(guild_id)
+            self._role_history[guild_id] = stored if stored else {}
+
     # =======================================================
     # 外部用API（/split run）
     # =======================================================
@@ -120,26 +149,7 @@ class SplitService:
         ]
 
         store = get_stats_store()
-
-        # 再起動後に備えてディスクから履歴を遅延ロード
-        if guild_id not in self._prev_teams:
-            prev = store.get_prev_match(guild_id)
-            if prev:
-                self._prev_teams[guild_id] = {
-                    uid: tidx for tidx, uids in enumerate(prev) for uid in uids
-                }
-
-        if guild_id not in self._pair_history:
-            raw = store.get_pair_history(guild_id)
-            self._pair_history[guild_id] = {
-                (int(k.split('_')[0]), int(k.split('_')[1])): v
-                for k, v in raw.items()
-            }
-
-        if guild_id not in self._spectator_counts:
-            counts, last = store.get_spectator_history(guild_id)
-            self._spectator_counts[guild_id] = counts
-            self._last_spectators[guild_id] = set(last)
+        self._ensure_history_cache(guild_id)
 
         cfg = get_store().get_split_config(guild_id)
         result = self.split_custom(guild_id, players, mode, cfg, team_count)
@@ -176,6 +186,29 @@ class SplitService:
 
         return result
 
+    def preview_split(
+        self,
+        guild_id: int,
+        players: List[Player],
+        mode: SplitMode,
+        cfg,
+        team_count: int = 2,
+    ) -> SplitResult:
+        self._ensure_history_cache(guild_id)
+        preview_role_history = {
+            uid: list(hist)
+            for uid, hist in self._role_history.get(guild_id, {}).items()
+        }
+        return self._split_players(
+            guild_id,
+            players,
+            mode,
+            cfg,
+            team_count,
+            dry_run=True,
+            preview_role_history=preview_role_history,
+        )
+
     # =======================================================
     # /split test 用
     # =======================================================
@@ -201,6 +234,7 @@ class SplitService:
         cfg,
         team_count: int,
         dry_run: bool = False,
+        preview_role_history: Optional[Dict[int, List[str]]] = None,
     ) -> SplitResult:
 
         # 0) 11人以上の場合、超過分を観戦者に（連続回避・観戦回数の少ない順で公平に選出）
@@ -328,12 +362,16 @@ class SplitService:
 
         # 2) ロール割当
         final_roles: Dict[int, str] = {}
-        # dry_run（テスト実行）の場合は使い捨てのdictを使い、本番の履歴を汚染しない
-        if not dry_run and guild_id not in self._role_history:
-            stored = get_stats_store().get_role_history(guild_id)
-            if stored:
-                self._role_history[guild_id] = stored
-        guild_hist = {} if dry_run else self._role_history.setdefault(guild_id, {})
+        if preview_role_history is not None:
+            guild_hist = {
+                uid: list(hist)
+                for uid, hist in preview_role_history.items()
+            }
+        elif dry_run:
+            guild_hist = {}
+        else:
+            self._ensure_history_cache(guild_id)
+            guild_hist = self._role_history.setdefault(guild_id, {})
 
         for tidx, members in enumerate(teams_simple):
             roles = self._assign_roles_for_team(len(members), mode, cfg)
