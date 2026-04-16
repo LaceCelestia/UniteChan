@@ -57,15 +57,20 @@ class GuiPanelState:
     team_a: list[int] = field(default_factory=list)
     team_b: list[int] = field(default_factory=list)
     spectators: list[int] = field(default_factory=list)
+    manual_spectators: list[int] = field(default_factory=list)
     recorded_winner: int | None = None
     awaiting_result: bool = False
     auto_result: SplitResult | None = None
     auto_result_mode_code: str | None = None
+    preview_spectator_counts: dict[int, int] = field(default_factory=dict)
+    preview_last_spectators: set[int] = field(default_factory=set)
+    preview_spectator_seeded: bool = False
 
     def _remove_from_assignments(self, user_id: int) -> None:
         self.team_a = [uid for uid in self.team_a if uid != user_id]
         self.team_b = [uid for uid in self.team_b if uid != user_id]
         self.spectators = [uid for uid in self.spectators if uid != user_id]
+        self.manual_spectators = [uid for uid in self.manual_spectators if uid != user_id]
 
     def _clear_result(self) -> None:
         self.recorded_winner = None
@@ -86,7 +91,7 @@ class GuiPanelState:
         return [list(self.team_a), list(self.team_b)]
 
     def playable_pool(self) -> list[int]:
-        spectator_ids = set(self.spectators)
+        spectator_ids = set(self.manual_spectators)
         return [uid for uid in self.pool if uid not in spectator_ids]
 
     def assign_team(self, user_id: int, team_idx: int) -> bool:
@@ -107,12 +112,13 @@ class GuiPanelState:
         return True
 
     def assign_spectator(self, user_id: int) -> bool:
-        if user_id in self.spectators:
+        if user_id in self.manual_spectators:
             return False
         if user_id not in self.pool:
             self.pool.append(user_id)
         self._remove_from_assignments(user_id)
         self.spectators.append(user_id)
+        self.manual_spectators.append(user_id)
         self._clear_auto_result()
         self._clear_result()
         return True
@@ -122,6 +128,9 @@ class GuiPanelState:
             return False
         self.pool = [uid for uid in self.pool if uid != user_id]
         self._remove_from_assignments(user_id)
+        self.preview_spectator_counts.pop(user_id, None)
+        self.preview_last_spectators.discard(user_id)
+        self.preview_spectator_seeded = False
         self._clear_auto_result()
         self._clear_result()
         return True
@@ -133,15 +142,28 @@ class GuiPanelState:
         self.team_a = [uid for uid in self.team_a if uid in allowed]
         self.team_b = [uid for uid in self.team_b if uid in allowed]
         self.spectators = [uid for uid in self.spectators if uid in allowed]
+        self.manual_spectators = [uid for uid in self.manual_spectators if uid in allowed]
+        self.preview_spectator_counts = {
+            uid: count for uid, count in self.preview_spectator_counts.items() if uid in allowed
+        }
+        self.preview_last_spectators &= allowed
+        self.preview_spectator_seeded = False
         self._clear_auto_result()
         self._clear_result()
 
     def reset_assignments(self) -> bool:
-        if not self.team_a and not self.team_b and not self.spectators and self.recorded_winner is None:
+        if (
+            not self.team_a
+            and not self.team_b
+            and not self.spectators
+            and not self.manual_spectators
+            and self.recorded_winner is None
+        ):
             return False
         self.team_a = []
         self.team_b = []
         self.spectators = []
+        self.manual_spectators = []
         self._clear_auto_result()
         self._clear_result()
         return True
@@ -158,6 +180,7 @@ class GuiPanelState:
         self.team_a = _ordered_unique(team_a)
         self.team_b = _ordered_unique(team_b)
         self.spectators = _ordered_unique(spectators)
+        self.manual_spectators = [uid for uid in self.manual_spectators if uid in self.spectators]
         self.pool = _ordered_unique(self.pool + self.team_a + self.team_b + self.spectators)
         self.auto_result = split_result
         self.auto_result_mode_code = mode_code if split_result is not None else None
@@ -258,13 +281,19 @@ class GuiMode(commands.Cog):
             key=lambda uid: self._resolve_name_guild_cached(guild, uid).casefold(),
         )
 
-    async def _format_member_lines(self, guild: discord.Guild, user_ids: list[int]) -> str:
+    async def _format_member_lines(
+        self,
+        guild: discord.Guild,
+        user_ids: list[int],
+        *,
+        marker: str = "-",
+    ) -> str:
         if not user_ids:
             return '(なし)'
         names = await asyncio.gather(
             *(self._resolve_name_guild(guild, uid) for uid in user_ids)
         )
-        return '\n'.join(f'- **{name}**' for name in names)
+        return '\n'.join(f'{marker} **{name}**' for name in names)
 
     async def _resolve_name_map(self, guild: discord.Guild, user_ids: list[int]) -> dict[int, str]:
         ordered = _ordered_unique(user_ids)
@@ -343,22 +372,22 @@ class GuiMode(commands.Cog):
         else:
             embed.add_field(
                 name=f'🟦 Team A ({len(state.team_a)})',
-                value=await self._format_member_lines(guild, state.team_a),
+                value=await self._format_member_lines(guild, state.team_a, marker='🟦'),
                 inline=True,
             )
             embed.add_field(
                 name=f'🟥 Team B ({len(state.team_b)})',
-                value=await self._format_member_lines(guild, state.team_b),
+                value=await self._format_member_lines(guild, state.team_b, marker='🟥'),
                 inline=True,
             )
         embed.add_field(
             name=f'👀 観戦 ({len(state.spectators)})',
-            value=await self._format_member_lines(guild, state.spectators),
+            value=await self._format_member_lines(guild, state.spectators, marker='👀'),
             inline=False,
         )
         embed.add_field(
             name=f'📋 未割当 ({len(state.unassigned())})',
-            value=await self._format_member_lines(guild, state.unassigned()),
+            value=await self._format_member_lines(guild, state.unassigned(), marker='▫️'),
             inline=False,
         )
         if cfg.banned_pokemon:
@@ -442,6 +471,15 @@ class GuiMode(commands.Cog):
         mode = SplitMode.parse(state.mode_code)
         cfg = get_store().get_split_config(guild.id)
         _, ranks = self.lobby_store.snapshot(guild.id)
+        if not state.preview_spectator_seeded:
+            counts, last = self.service.get_spectator_history(guild.id)
+            state.preview_spectator_counts = {
+                uid: count for uid, count in counts.items() if uid in state.pool
+            }
+            state.preview_last_spectators = {
+                uid for uid in last if uid in state.pool
+            }
+            state.preview_spectator_seeded = True
         players = [
             Player(
                 uid,
@@ -450,10 +488,20 @@ class GuiMode(commands.Cog):
             )
             for uid in player_ids
         ]
-        result = self.service.preview_split(guild.id, players, mode, cfg)
+        result = self.service.preview_split(
+            guild.id,
+            players,
+            mode,
+            cfg,
+            preview_spectator_counts=dict(state.preview_spectator_counts),
+            preview_last_spectators=set(state.preview_last_spectators),
+        )
 
-        manual_spectators = list(state.spectators)
+        manual_spectators = list(state.manual_spectators)
         auto_spectators = [player.user_id for player in result.spectators]
+        for uid in auto_spectators:
+            state.preview_spectator_counts[uid] = state.preview_spectator_counts.get(uid, 0) + 1
+        state.preview_last_spectators = set(auto_spectators)
         state.apply_split(
             [member.user_id for member in result.teams[0].members],
             [member.user_id for member in result.teams[1].members],

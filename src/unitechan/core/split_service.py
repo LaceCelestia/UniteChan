@@ -193,6 +193,8 @@ class SplitService:
         mode: SplitMode,
         cfg,
         team_count: int = 2,
+        preview_spectator_counts: Optional[Dict[int, int]] = None,
+        preview_last_spectators: Optional[set[int]] = None,
     ) -> SplitResult:
         self._ensure_history_cache(guild_id)
         preview_role_history = {
@@ -207,6 +209,15 @@ class SplitService:
             team_count,
             dry_run=True,
             preview_role_history=preview_role_history,
+            preview_spectator_counts=preview_spectator_counts,
+            preview_last_spectators=preview_last_spectators,
+        )
+
+    def get_spectator_history(self, guild_id: int) -> tuple[Dict[int, int], set[int]]:
+        self._ensure_history_cache(guild_id)
+        return (
+            dict(self._spectator_counts.get(guild_id, {})),
+            set(self._last_spectators.get(guild_id, set())),
         )
 
     # =======================================================
@@ -235,6 +246,8 @@ class SplitService:
         team_count: int,
         dry_run: bool = False,
         preview_role_history: Optional[Dict[int, List[str]]] = None,
+        preview_spectator_counts: Optional[Dict[int, int]] = None,
+        preview_last_spectators: Optional[set[int]] = None,
     ) -> SplitResult:
 
         # 0) 11人以上の場合、超過分を観戦者に（連続回避・観戦回数の少ない順で公平に選出）
@@ -242,8 +255,14 @@ class SplitService:
         spectators: List[Player] = []
         if len(players) > max_players:
             n_spec = len(players) - max_players
-            spec_counts = self._spectator_counts.get(guild_id, {})
-            last_specs = self._last_spectators.get(guild_id, set())
+            if dry_run and preview_spectator_counts is not None:
+                spec_counts = preview_spectator_counts
+            else:
+                spec_counts = self._spectator_counts.get(guild_id, {})
+            if dry_run and preview_last_spectators is not None:
+                last_specs = preview_last_spectators
+            else:
+                last_specs = self._last_spectators.get(guild_id, set())
 
             # 直前に観戦した人は今回はプレイ優先（連続観戦NG）
             can_spec = [p for p in players if p.user_id not in last_specs]
