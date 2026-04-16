@@ -395,9 +395,26 @@ class GuiMode(commands.Cog):
                     continue
         return moved
 
-    def _sync_from_lobby(self, guild: discord.Guild, state: GuiPanelState) -> None:
-        lobby, _ = self.lobby_store.snapshot(guild.id)
-        state.replace_pool(self._sort_user_ids(guild, list(lobby)))
+    def _sync_from_voice_channel(
+        self,
+        guild: discord.Guild,
+        state: GuiPanelState,
+        actor: discord.abc.User,
+    ) -> None:
+        if not isinstance(actor, discord.Member):
+            raise ValueError('サーバー内で使ってね。')
+
+        vc = actor.voice and actor.voice.channel
+        if vc is None:
+            raise ValueError('あなたがVCに参加していません。')
+
+        members = [member for member in vc.members if not member.bot]
+        if not members:
+            raise ValueError(f'**{vc.name}** にBotでないメンバーがいません。')
+
+        user_ids = {member.id for member in members}
+        self.lobby_store.set_members(guild.id, user_ids)
+        state.replace_pool(self._sort_user_ids(guild, list(user_ids)))
 
     def _auto_split(self, guild: discord.Guild, state: GuiPanelState) -> None:
         if state.use_config_code:
@@ -626,7 +643,11 @@ class GuiModeView(discord.ui.View):
         if interaction.guild is None:
             await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
             return
-        self.cog._sync_from_lobby(interaction.guild, self.state)
+        try:
+            self.cog._sync_from_voice_channel(interaction.guild, self.state, interaction.user)
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
         await self._update_message(interaction)
 
     @discord.ui.button(label='自動分け', emoji='🎲', style=discord.ButtonStyle.success, custom_id='guimode_auto', row=1)
