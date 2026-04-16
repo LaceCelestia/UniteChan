@@ -46,14 +46,16 @@ _DEMO_PLAYERS = [
 ]
 
 _REACTION_EMOJIS = ['🇦', '🇧', '🎙️', '🔄']
-
-NUMS = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩"]
 TEAM_LABELS = ["🟦 Team A", "🟥 Team B"]
 
 
 def _role_label(role_key: str) -> str:
     code = ROLE_CODE.get(role_key, role_key[:3].upper())
     return ROLE_BADGES.get(code, code)
+
+
+def _line_number(index: int) -> str:
+    return f"`{index + 1}.`"
 
 
 @dataclass
@@ -150,14 +152,14 @@ class TeamSplit(commands.Cog):
             label = TEAM_LABELS[idx]
             lines: List[str] = []
             for i, mem in enumerate(team.members):
-                num = NUMS[i] if i < len(NUMS) else f"{i + 1}."
+                num = _line_number(i)
                 name = names.get(mem.user_id, f"ID:{mem.user_id}")
                 if mem.pokemon:
-                    lines.append(f"{num} {name}  **{_role_label(mem.role)}** {mem.pokemon}")
+                    lines.append(f"{num} **{name}**  **{_role_label(mem.role)}** {mem.pokemon}")
                 elif mode.role_balance_mode != 0:
-                    lines.append(f"{num} {name}  **{_role_label(mem.role)}**")
+                    lines.append(f"{num} **{name}**  **{_role_label(mem.role)}**")
                 else:
-                    lines.append(f"{num} {name}")
+                    lines.append(f"{num} **{name}**")
 
             if team.team_pokemon:
                 lines.append("")
@@ -179,7 +181,7 @@ class TeamSplit(commands.Cog):
             ]
             embed.add_field(
                 name=f"👀 観戦 — {len(result.spectators)}人",
-                value="  ".join(spec_names),
+                value="\n".join(f"- **{name}**" for name in spec_names),
                 inline=False,
             )
 

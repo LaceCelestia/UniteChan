@@ -18,7 +18,6 @@ from unitechan.core.stats_store import get_stats_store
 MAX_TEAM_SIZE = 5
 _JST = timezone(timedelta(hours=9))
 _TRANSIENT_NOTICE_SECONDS = 15
-NUMS = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩"]
 TEAM_LABELS = ["🟦 Team A", "🟥 Team B"]
 ROLE_BADGES = {
     "ATK": "🟥ATK",
@@ -43,6 +42,10 @@ def _ordered_unique(user_ids: list[int]) -> list[int]:
 def _role_label(role_key: str) -> str:
     code = ROLE_CODE.get(role_key, role_key[:3].upper())
     return ROLE_BADGES.get(code, code)
+
+
+def _line_number(index: int) -> str:
+    return f"`{index + 1}.`"
 
 
 @dataclass
@@ -192,6 +195,14 @@ class GuiMode(commands.Cog):
         self._name_cache: dict[tuple[int, int], str] = {}
         self._active_views: dict[int, set[GuiModeView]] = {}
 
+    def clear_name_cache(self, guild_id: int, user_id: int | None = None) -> None:
+        if user_id is None:
+            stale_keys = [key for key in self._name_cache if key[0] == guild_id]
+            for key in stale_keys:
+                self._name_cache.pop(key, None)
+            return
+        self._name_cache.pop((guild_id, user_id), None)
+
     def _resolve_name_guild_cached(self, guild: discord.Guild, uid: int) -> str:
         alias = self.lobby_store.get_alias(guild.id, uid)
         if alias:
@@ -215,15 +226,20 @@ class GuiMode(commands.Cog):
         if alias:
             return alias
 
-        cache_key = (guild.id, uid)
-        cached = self._name_cache.get(cache_key)
-        if cached:
-            return cached
+        member = guild.get_member(uid)
+        if member is not None:
+            self._name_cache[(guild.id, uid)] = member.display_name
+            return member.display_name
 
+        cache_key = (guild.id, uid)
         member = await self._resolve_member(guild, uid)
         if member is not None:
             self._name_cache[cache_key] = member.display_name
             return member.display_name
+
+        cached = self._name_cache.get(cache_key)
+        if cached:
+            return cached
 
         user = self.bot.get_user(uid)
         if user is not None:
@@ -248,7 +264,7 @@ class GuiMode(commands.Cog):
         names = await asyncio.gather(
             *(self._resolve_name_guild(guild, uid) for uid in user_ids)
         )
-        return '\n'.join(f'・{name}' for name in names)
+        return '\n'.join(f'- **{name}**' for name in names)
 
     async def _resolve_name_map(self, guild: discord.Guild, user_ids: list[int]) -> dict[int, str]:
         ordered = _ordered_unique(user_ids)
@@ -302,14 +318,14 @@ class GuiMode(commands.Cog):
             for idx, team in enumerate(auto_result.teams):
                 lines: list[str] = []
                 for i, mem in enumerate(team.members):
-                    num = NUMS[i] if i < len(NUMS) else f"{i + 1}."
+                    num = _line_number(i)
                     name = name_map.get(mem.user_id, f"ID:{mem.user_id}")
                     if mem.pokemon:
-                        lines.append(f"{num} {name}  **{_role_label(mem.role)}** {mem.pokemon}")
+                        lines.append(f"{num} **{name}**  **{_role_label(mem.role)}** {mem.pokemon}")
                     elif mode.role_balance_mode != 0:
-                        lines.append(f"{num} {name}  **{_role_label(mem.role)}**")
+                        lines.append(f"{num} **{name}**  **{_role_label(mem.role)}**")
                     else:
-                        lines.append(f"{num} {name}")
+                        lines.append(f"{num} **{name}**")
 
                 if team.team_pokemon:
                     lines.append("")
@@ -463,11 +479,16 @@ class GuiMode(commands.Cog):
         if not views:
             self._active_views.pop(guild_id, None)
 
-    async def refresh_guild_panels(self, guild: discord.Guild) -> int:
+    async def refresh_guild_panels(
+        self,
+        guild: discord.Guild,
+        *,
+        sync_pool: bool = False,
+    ) -> int:
         refreshed = 0
         for view in list(self._active_views.get(guild.id, set())):
             try:
-                if await view.refresh_from_config(guild):
+                if await view.refresh_panel(guild, sync_pool=sync_pool):
                     refreshed += 1
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 self._unregister_view(guild.id, view)
@@ -518,13 +539,27 @@ class GuiModeView(discord.ui.View):
     def bind_message(self, message: discord.Message) -> None:
         self.message = message
 
-    async def refresh_from_config(self, guild: discord.Guild) -> bool:
-        if not self.state.use_config_code or self.message is None:
+    async def refresh_panel(self, guild: discord.Guild, *, sync_pool: bool = False) -> bool:
+        if self.message is None:
             return False
-        new_code = get_store().get_split_code(guild.id)
-        if new_code == self.state.mode_code:
+
+        changed = False
+        if sync_pool:
+            lobby, _ = self.cog.lobby_store.snapshot(guild.id)
+            new_pool = self.cog._sort_user_ids(guild, list(lobby))
+            if new_pool != self.state.pool:
+                self.state.replace_pool(new_pool)
+                changed = True
+
+        if self.state.use_config_code:
+            new_code = get_store().get_split_code(guild.id)
+            if new_code != self.state.mode_code:
+                self.state.mode_code = new_code
+                changed = True
+
+        if not changed:
             return False
-        self.state.mode_code = new_code
+
         self._refresh_disabled()
         await self.message.edit(
             embed=await self.cog._build_embed(guild, self.state),

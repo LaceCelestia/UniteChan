@@ -27,6 +27,12 @@ class Lobby(commands.Cog):
             return False
         return True
 
+    async def _refresh_gui_panels(self, guild: discord.Guild, *, sync_pool: bool = True) -> int:
+        gui_cog = self.bot.get_cog('GuiMode')
+        if gui_cog is None or not hasattr(gui_cog, 'refresh_guild_panels'):
+            return 0
+        return await gui_cog.refresh_guild_panels(guild, sync_pool=sync_pool)
+
     # ---- コマンド ----
 
     @app_commands.command(name='join', description='ユナイト用ロビーに参加します')
@@ -62,6 +68,9 @@ class Lobby(commands.Cog):
             if member else
             f'ロビーに参加しました！\n現在人数: **{size}人**'
         )
+        refreshed = await self._refresh_gui_panels(interaction.guild)
+        if refreshed > 0:
+            msg += f'\nGUIパネル {refreshed} 件にも反映しました。'
         await interaction.response.send_message(msg, ephemeral=True)
 
     @app_commands.command(name='leave', description='ロビーから抜けます')
@@ -78,8 +87,12 @@ class Lobby(commands.Cog):
             return
 
         size = self.store.leave(guild_id, interaction.user.id)
+        refreshed = await self._refresh_gui_panels(interaction.guild)
+        msg = f'ロビーから抜けました。\n現在人数: **{size}人**'
+        if refreshed > 0:
+            msg += f'\nGUIパネル {refreshed} 件にも反映しました。'
         await interaction.response.send_message(
-            f'ロビーから抜けました。\n現在人数: **{size}人**',
+            msg,
             ephemeral=True,
         )
 
@@ -124,8 +137,12 @@ class Lobby(commands.Cog):
             await interaction.response.send_message('そのメンバーはロビーにいません。', ephemeral=True)
             return
 
+        refreshed = await self._refresh_gui_panels(interaction.guild)  # type: ignore[arg-type]
+        msg = f'{member.display_name} をロビーから削除しました。'
+        if refreshed > 0:
+            msg += f'\nGUIパネル {refreshed} 件にも反映しました。'
         await interaction.response.send_message(
-            f'{member.display_name} をロビーから削除しました。',
+            msg,
             ephemeral=True,
         )
 
@@ -171,8 +188,10 @@ class Lobby(commands.Cog):
         self.store.set_members(interaction.guild.id, {m.id for m in members})  # type: ignore[union-attr]
 
         lines = '\n'.join(f'- {m.display_name}' for m in members)
+        refreshed = await self._refresh_gui_panels(interaction.guild)  # type: ignore[arg-type]
+        extra = f'\nGUIパネル {refreshed} 件にも反映しました。' if refreshed > 0 else ''
         await interaction.response.send_message(
-            f'**{vc.name}** のメンバー {len(members)}人 をロビーに登録しました。\n{lines}',
+            f'**{vc.name}** のメンバー {len(members)}人 をロビーに登録しました。\n{lines}{extra}',
             ephemeral=True,
         )
 
@@ -190,7 +209,11 @@ class Lobby(commands.Cog):
 
         count = len(lobby)
         self.store.set_members(guild_id, set())
-        await interaction.response.send_message(f'ロビーを解散しました。（{count}人）', ephemeral=True)
+        refreshed = await self._refresh_gui_panels(interaction.guild)  # type: ignore[arg-type]
+        msg = f'ロビーを解散しました。（{count}人）'
+        if refreshed > 0:
+            msg += f'\nGUIパネル {refreshed} 件にも反映しました。'
+        await interaction.response.send_message(msg, ephemeral=True)
 
 
     @app_commands.command(name='name', description='表示名（ニックネーム）を変更します')
@@ -217,11 +240,17 @@ class Lobby(commands.Cog):
             return
 
         self.store.set_alias(interaction.guild.id, target.id, name)  # type: ignore[union-attr]
+        gui_cog = self.bot.get_cog('GuiMode')
+        if gui_cog is not None and hasattr(gui_cog, 'clear_name_cache'):
+            gui_cog.clear_name_cache(interaction.guild.id, target.id)
 
         if name:
             msg = f'**{target.display_name}** の表示名を **{name}** に変更しました。' if member else f'表示名を **{name}** に変更しました。'
         else:
             msg = f'**{target.display_name}** の表示名をリセットしました。' if member else '表示名をリセットしました。'
+        refreshed = await self._refresh_gui_panels(interaction.guild, sync_pool=False)
+        if refreshed > 0:
+            msg += f'\nGUIパネル {refreshed} 件にも反映しました。'
         await interaction.response.send_message(msg, ephemeral=True)
 
 
