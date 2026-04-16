@@ -542,6 +542,16 @@ class GuiMode(commands.Cog):
                 self._unregister_view(guild.id, view)
         return refreshed
 
+    async def remove_user_from_guild_panels(self, guild: discord.Guild, user_id: int) -> int:
+        refreshed = 0
+        for view in list(self._active_views.get(guild.id, set())):
+            try:
+                if await view.remove_user(guild, user_id):
+                    refreshed += 1
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                self._unregister_view(guild.id, view)
+        return refreshed
+
     @app_commands.command(name='guimode', description='ボタン操作でチーム分けを進めるGUIパネルを作成します')
     @app_commands.describe(code='5桁コード。省略時は /config split の設定値を使用')
     async def guimode(self, interaction: discord.Interaction, code: str | None = None) -> None:
@@ -606,6 +616,19 @@ class GuiModeView(discord.ui.View):
                 changed = True
 
         if not changed:
+            return False
+
+        self._refresh_disabled()
+        await self.message.edit(
+            embed=await self.cog._build_embed(guild, self.state),
+            view=self,
+        )
+        return True
+
+    async def remove_user(self, guild: discord.Guild, user_id: int) -> bool:
+        if self.message is None:
+            return False
+        if not self.state.remove_user(user_id):
             return False
 
         self._refresh_disabled()

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unitechan"
-version = "0.2.3"
+version = "0.2.4"
 description = "Pokemon Unite Team Splitting Bot"
 requires-python = ">=3.11"
 dependencies = [

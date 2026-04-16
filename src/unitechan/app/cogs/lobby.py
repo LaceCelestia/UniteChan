@@ -33,6 +33,12 @@ class Lobby(commands.Cog):
             return 0
         return await gui_cog.refresh_guild_panels(guild, sync_pool=sync_pool)
 
+    async def _remove_user_from_gui_panels(self, guild: discord.Guild, user_id: int) -> int:
+        gui_cog = self.bot.get_cog('GuiMode')
+        if gui_cog is None or not hasattr(gui_cog, 'remove_user_from_guild_panels'):
+            return 0
+        return await gui_cog.remove_user_from_guild_panels(guild, user_id)
+
     # ---- コマンド ----
 
     @app_commands.command(name='join', description='ユナイト用ロビーに参加します')
@@ -137,10 +143,12 @@ class Lobby(commands.Cog):
             await interaction.response.send_message('そのメンバーはロビーにいません。', ephemeral=True)
             return
 
+        removed = await self._remove_user_from_gui_panels(interaction.guild, member.id)  # type: ignore[arg-type]
         refreshed = await self._refresh_gui_panels(interaction.guild)  # type: ignore[arg-type]
         msg = f'{member.display_name} をロビーから削除しました。'
-        if refreshed > 0:
-            msg += f'\nGUIパネル {refreshed} 件にも反映しました。'
+        panel_updates = max(removed, refreshed)
+        if panel_updates > 0:
+            msg += f'\nGUIパネル {panel_updates} 件にも反映しました。'
         await interaction.response.send_message(
             msg,
             ephemeral=True,
