@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 from datetime import datetime, timezone, timedelta
@@ -11,13 +12,16 @@ from discord.ext import commands
 
 from unitechan.core.stats_store import get_stats_store
 from unitechan.core.lobby_store import LobbyStore
+from unitechan.core.split_service import SplitService
 from unitechan.app.cogs._utils import is_admin
 
 _JST = timezone(timedelta(hours=9))
+_MAX_STATS_RANKING_ROWS = 25
+_MAX_IMPORT_BYTES = 1_000_000
 
 
-async def _resolve_name(guild: discord.Guild, uid: int) -> str:
-    alias = LobbyStore().get_alias(guild.id, uid)
+async def _resolve_name(guild: discord.Guild, uid: int, lobby_store: LobbyStore) -> str:
+    alias = lobby_store.get_alias(guild.id, uid)
     if alias:
         return alias
     m = guild.get_member(uid)
@@ -32,6 +36,10 @@ async def _resolve_name(guild: discord.Guild, uid: int) -> str:
 
 class ResultCommands(commands.Cog):
     """試合結果・戦績管理 Cog"""
+
+    def __init__(self, bot: commands.Bot) -> None:
+        self.bot = bot
+        self.lobby_store = LobbyStore()
 
     # ---- /result ----
 
@@ -61,6 +69,9 @@ class ResultCommands(commands.Cog):
         if interaction.guild is None:
             await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
             return
+        if not is_admin(interaction):
+            await interaction.response.send_message('このコマンドは管理者のみ使用できます。', ephemeral=True)
+            return
 
         store = get_stats_store()
         guild_id = interaction.guild.id
@@ -73,11 +84,39 @@ class ResultCommands(commands.Cog):
             )
             return
 
-        winning_idx = 0 if team == 'a' else 1
-        winners, losers = store.record_result(guild_id, winning_idx)
+        await interaction.response.defer()
+        if store.get_last_match(guild_id) != last:
+            await interaction.followup.send(
+                'この試合はすでに記録済み、または別の試合に更新されています。',
+                ephemeral=True,
+            )
+            return
 
-        winner_names = [await _resolve_name(interaction.guild, uid) for uid in winners]
-        loser_names = [await _resolve_name(interaction.guild, uid) for uid in losers]
+        winning_idx = 0 if team == 'a' else 1
+        committed = False
+        split_cog = interaction.client.get_cog('TeamSplit')
+        if split_cog is not None and hasattr(split_cog, 'commit_history_for_teams'):
+            committed = split_cog.commit_history_for_teams(guild_id, last)
+        if not committed:
+            service = SplitService(LobbyStore())
+            if not service.commit_teams_with_stored_context(guild_id, last):
+                service.commit_teams(guild_id, last)
+        winners, losers = store.record_result(guild_id, winning_idx)
+        if not winners:
+            await interaction.followup.send(
+                '記録できる試合が見つかりませんでした。最新のチーム分けを確認してください。',
+                ephemeral=True,
+            )
+            return
+
+        resolved_names = await asyncio.gather(
+            *(
+                _resolve_name(interaction.guild, uid, self.lobby_store)
+                for uid in [*winners, *losers]
+            )
+        )
+        winner_names = list(resolved_names[:len(winners)])
+        loser_names = list(resolved_names[len(winners):])
 
         team_label = 'Team A' if team == 'a' else 'Team B'
         embed = discord.Embed(title=f'🏆 {team_label} の勝利！', color=0xf1c40f)
@@ -91,7 +130,7 @@ class ResultCommands(commands.Cog):
             value='\n'.join(f'・{n}' for n in loser_names) or '(なし)',
             inline=True,
         )
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
     # ---- /stats ----
 
@@ -157,17 +196,25 @@ class ResultCommands(commands.Cog):
 
         sorted_records = sorted(all_records.items(), key=sort_key)
 
+        await interaction.response.defer()
+
+        display_records = sorted_records[:_MAX_STATS_RANKING_ROWS]
+        names = await asyncio.gather(
+            *(_resolve_name(interaction.guild, uid, self.lobby_store) for uid, _ in display_records)
+        )
         lines: List[str] = []
         medals = ['🥇', '🥈', '🥉']
-        for rank, (uid, r) in enumerate(sorted_records):
-            name = await _resolve_name(interaction.guild, uid)
+        for rank, ((uid, r), name) in enumerate(zip(display_records, names)):
             games = r['wins'] + r['losses']
             rate = f"{r['wins'] / games * 100:.1f}%" if games else '-%'
             prefix = medals[rank] if rank < 3 else f'**{rank + 1}.**'
             lines.append(f"{prefix} {name}　{r['wins']}勝 {r['losses']}敗　勝率 {rate}")
+        hidden = len(sorted_records) - len(display_records)
+        if hidden > 0:
+            lines.append(f'ほか {hidden}人')
 
         embed = discord.Embed(title=title, description='\n'.join(lines))
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
     @stats.command(name='reset', description='このサーバーの戦績をすべてリセットします（管理者専用）')
     async def stats_reset(self, interaction: discord.Interaction) -> None:
@@ -179,6 +226,7 @@ class ResultCommands(commands.Cog):
             return
 
         count = get_stats_store().reset_stats(interaction.guild.id)
+        SplitService.clear_history_cache(interaction.guild.id)
         if count == 0:
             await interaction.response.send_message('リセットする戦績がありません。', ephemeral=True)
             return
@@ -188,6 +236,9 @@ class ResultCommands(commands.Cog):
     async def stats_export(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
             await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
+            return
+        if not is_admin(interaction):
+            await interaction.response.send_message('このコマンドは管理者のみ使用できます。', ephemeral=True)
             return
 
         data = get_stats_store().export_stats(interaction.guild.id)
@@ -219,11 +270,17 @@ class ResultCommands(commands.Cog):
         if not file.filename.endswith('.json'):
             await interaction.response.send_message('JSONファイルを添付してください。', ephemeral=True)
             return
+        if file.size is not None and file.size > _MAX_IMPORT_BYTES:
+            await interaction.response.send_message('JSONファイルが大きすぎます。1MB以下にしてください。', ephemeral=True)
+            return
 
         await interaction.response.defer(ephemeral=True)
 
         try:
             raw = await file.read()
+            if len(raw) > _MAX_IMPORT_BYTES:
+                await interaction.followup.send('JSONファイルが大きすぎます。1MB以下にしてください。', ephemeral=True)
+                return
             data = json.loads(raw.decode('utf-8'))
             result = get_stats_store().merge_stats(interaction.guild.id, data)
         except (json.JSONDecodeError, UnicodeDecodeError):

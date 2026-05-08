@@ -64,6 +64,21 @@ class SplitMode:
             self.role_balance_mode = 1
             return
 
+        if len(mode_raw) != 5 or not mode_raw.isdigit():
+            raise ValueError("5桁の数字で指定してください。例: 00000 / 11110 / 12111")
+
+        a, b, c, d, e = mode_raw
+        if a not in ("0", "1", "2", "3"):
+            raise ValueError("1桁目（バランス方式）は 0～3 で指定してください。")
+        if b not in ("0", "1", "2"):
+            raise ValueError("2桁目（ロールバランス）は 0/1/2 で指定してください。")
+        if c not in ("0", "1", "2"):
+            raise ValueError("3桁目（ポケモン割り当て）は 0/1/2 で指定してください。")
+        if d not in ("0", "1"):
+            raise ValueError("4桁目（連続ロール回避）は 0/1 で指定してください。")
+        if e not in ("0", "1"):
+            raise ValueError("5桁目（チーム間重複許可）は 0/1 で指定してください。")
+
         # 通常の 5桁コード
         if len(mode_raw) == 5 and mode_raw.isdigit():
             a, b, c, d, e = mode_raw

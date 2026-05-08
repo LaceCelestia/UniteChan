@@ -4,6 +4,7 @@ from discord.ext import commands
 
 from unitechan.core.config_store import get_store
 from unitechan.core.split_mode import SplitMode
+from unitechan.app.cogs._utils import is_admin
 
 
 config_group = app_commands.Group(name='config', description='ユナイトちゃんの設定')
@@ -65,6 +66,10 @@ async def config_role_balance(
         await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
         return
 
+    if not is_admin(interaction):
+        await interaction.response.send_message('このコマンドは管理者のみ使用できます。', ephemeral=True)
+        return
+
     total = atk + all + spd + deff + sup
     if total != 5:
         await interaction.response.send_message(
@@ -95,6 +100,10 @@ async def config_avoid(
 ) -> None:
     if interaction.guild is None:
         await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
+        return
+
+    if not is_admin(interaction):
+        await interaction.response.send_message('このコマンドは管理者のみ使用できます。', ephemeral=True)
         return
 
     store = get_store()
@@ -174,9 +183,17 @@ async def config_reset(interaction: discord.Interaction) -> None:
         await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
         return
 
+    if not is_admin(interaction):
+        await interaction.response.send_message('このコマンドは管理者のみ使用できます。', ephemeral=True)
+        return
+
     store = get_store()
-    store.reset_guild(interaction.guild.id)
-    await interaction.response.send_message('このサーバーの /split 関連設定をリセットしました。', ephemeral=True)
+    changed = store.reset_split_settings(interaction.guild.id)
+    if changed:
+        msg = 'このサーバーのチーム分けコード、ロール構成、連続ロール回避設定をリセットしました。'
+    else:
+        msg = 'リセットするチーム分け設定はありません。'
+    await interaction.response.send_message(msg, ephemeral=True)
 
 
 @config_group.command(name='show', description='このサーバーの /split 設定を表示します')

@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 from typing import Dict, Set, Optional, Tuple
 
+from .paths import data_path
+
 
 # 旧実装の英語ランク → ポケモンユナイトの日本語ランク
 _EN_TO_JP_RANK = {
@@ -18,7 +20,7 @@ class LobbyStore:
     """ロビーとランク情報の永続化を担当するクラス"""
 
     # ★★★★★ ここをクラス変数にする（重要）★★★★★
-    _data_path: Path = Path("data/lobby_state.json")
+    _data_path: Path = data_path('lobby_state.json')
     _lobbies: Dict[int, Set[int]] = {}
     _ranks: Dict[int, Dict[int, str]] = {}
     _aliases: Dict[int, Dict[int, str]] = {}  # guild_id -> {user_id -> alias}
@@ -26,7 +28,13 @@ class LobbyStore:
 
     def __init__(self, data_path: Optional[Path] = None) -> None:
         if data_path:
-            LobbyStore._data_path = data_path
+            resolved_path = data_path
+            if resolved_path != LobbyStore._data_path:
+                LobbyStore._data_path = resolved_path
+                LobbyStore._lobbies = {}
+                LobbyStore._ranks = {}
+                LobbyStore._aliases = {}
+                LobbyStore._loaded = False
 
         # ★インスタンスごとではなく、一度だけ読み込む★
         if not LobbyStore._loaded:
@@ -49,29 +57,45 @@ class LobbyStore:
             return
         try:
             raw = json.loads(path.read_text(encoding='utf-8'))
-        except Exception:
-            return
+        except Exception as exc:
+            raise RuntimeError(f'failed to load lobby state: {path}') from exc
+        if not isinstance(raw, dict):
+            raise RuntimeError(f'invalid lobby state format: {path}')
 
         for gid_str, info in raw.items():
             try:
                 gid = int(gid_str)
             except ValueError:
                 continue
+            if not isinstance(info, dict):
+                continue
 
-            members = {int(uid) for uid in info.get('members', []) if str(uid).isdigit()}
+            members_raw = info.get('members', [])
+            if not isinstance(members_raw, list):
+                members_raw = []
+            members = {
+                parsed
+                for uid in members_raw
+                if str(uid).isdigit() and (parsed := int(uid)) > 0
+            }
             ranks_raw = info.get('ranks', {})
+            if not isinstance(ranks_raw, dict):
+                ranks_raw = {}
 
             ranks: Dict[int, str] = {}
             for uid_str, rank in ranks_raw.items():
-                if uid_str.isdigit():
+                if str(uid_str).isdigit():
                     uid = int(uid_str)
-                    ranks[uid] = self._normalize_rank(str(rank))
+                    if uid > 0:
+                        ranks[uid] = self._normalize_rank(str(rank))
 
             aliases_raw = info.get('aliases', {})
+            if not isinstance(aliases_raw, dict):
+                aliases_raw = {}
             aliases: Dict[int, str] = {
                 int(uid_str): str(name)
                 for uid_str, name in aliases_raw.items()
-                if uid_str.isdigit()
+                if str(uid_str).isdigit() and int(uid_str) > 0
             }
 
             LobbyStore._lobbies[gid] = members
@@ -94,10 +118,12 @@ class LobbyStore:
                 'aliases': {str(uid): name for uid, name in aliases.items()},
             }
 
-        path.write_text(
+        tmp_path = path.with_name(f'{path.name}.tmp')
+        tmp_path.write_text(
             json.dumps(data, ensure_ascii=False, indent=2),
             encoding='utf-8'
         )
+        tmp_path.replace(path)
 
     # ---- 公開API ----
 

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, FrozenSet, List, Optional
-from pathlib import Path
+from importlib import resources
+from typing import ClassVar, Dict, FrozenSet, List, Optional
 import random
 
 import yaml
@@ -11,6 +11,7 @@ from .lobby_store import LobbyStore
 from .split_mode import SplitMode
 from .config_store import get_store
 from .stats_store import get_stats_store
+from .paths import data_path
 
 # ランク順：弱 → 強
 _RANK_ORDER = [
@@ -43,6 +44,31 @@ def _stats_weight(record: dict) -> float:
 
 
 # ロールキー
+def _positive_uid(value: object) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str) and value.isdigit():
+        parsed = int(value)
+        return parsed if parsed > 0 else None
+    return None
+
+
+def _ordered_positive_uids(values: object) -> List[int]:
+    if not isinstance(values, list):
+        return []
+    result: List[int] = []
+    seen: set[int] = set()
+    for value in values:
+        uid = _positive_uid(value)
+        if uid is None or uid in seen:
+            continue
+        result.append(uid)
+        seen.add(uid)
+    return result
+
+
 ROLE_KEYS = ["attacker", "all_rounder", "speedster", "defender", "supporter"]
 
 # ロール3文字コード
@@ -53,6 +79,8 @@ ROLE_CODE = {
     "defender": "DEF",
     "supporter": "SUP",
 }
+
+_EXACT_SEPARATE_NODE_LIMIT = 100_000
 
 
 @dataclass
@@ -92,19 +120,36 @@ class SplitResult:
 class SplitService:
     """SplitMode の仕様を全部実装した完全版サービス"""
 
+    _shared_role_history: ClassVar[Dict[int, Dict[int, List[str]]]] = {}
+    _shared_prev_teams: ClassVar[Dict[int, Dict[int, int]]] = {}
+    _shared_pair_history: ClassVar[Dict[int, Dict[tuple, int]]] = {}
+    _shared_spectator_counts: ClassVar[Dict[int, Dict[int, int]]] = {}
+    _shared_last_spectators: ClassVar[Dict[int, set]] = {}
+
     def __init__(self, lobby_store: LobbyStore) -> None:
         self._lobby_store = lobby_store
         self._pokemon_by_role = self._load_pokemon_list()
+        self._all_pokemon_names = [
+            name for names in self._pokemon_by_role.values() for name in names
+        ]
         # guild_id -> user_id -> [roles...]
-        self._role_history: Dict[int, Dict[int, List[str]]] = {}
+        self._role_history = self._shared_role_history
         # guild_id -> user_id -> 直前の試合でのチームindex（prev_match永続化用）
-        self._prev_teams: Dict[int, Dict[int, int]] = {}
+        self._prev_teams = self._shared_prev_teams
         # guild_id -> (min_uid, max_uid) -> 同チーム累積回数
-        self._pair_history: Dict[int, Dict[tuple, int]] = {}
+        self._pair_history = self._shared_pair_history
         # guild_id -> user_id -> 観戦累積回数
-        self._spectator_counts: Dict[int, Dict[int, int]] = {}
+        self._spectator_counts = self._shared_spectator_counts
         # guild_id -> 直前の試合で観戦だった user_id の集合
-        self._last_spectators: Dict[int, set] = {}
+        self._last_spectators = self._shared_last_spectators
+
+    @classmethod
+    def clear_history_cache(cls, guild_id: int) -> None:
+        cls._shared_role_history.pop(guild_id, None)
+        cls._shared_prev_teams.pop(guild_id, None)
+        cls._shared_pair_history.pop(guild_id, None)
+        cls._shared_spectator_counts.pop(guild_id, None)
+        cls._shared_last_spectators.pop(guild_id, None)
 
     def _ensure_history_cache(self, guild_id: int) -> None:
         store = get_stats_store()
@@ -112,17 +157,31 @@ class SplitService:
         if guild_id not in self._prev_teams:
             prev = store.get_prev_match(guild_id)
             self._prev_teams[guild_id] = (
-                {uid: tidx for tidx, uids in enumerate(prev) for uid in uids}
-                if prev else
-                {}
+                {
+                    int(uid): tidx
+                    for tidx, uids in enumerate(prev)
+                    if isinstance(uids, list)
+                    for uid in uids
+                    if isinstance(uid, int) or (isinstance(uid, str) and uid.isdigit())
+                }
+                if isinstance(prev, list) else {}
             )
 
         if guild_id not in self._pair_history:
             raw = store.get_pair_history(guild_id)
-            self._pair_history[guild_id] = {
-                (int(k.split('_')[0]), int(k.split('_')[1])): v
-                for k, v in raw.items()
-            }
+            pair_history: Dict[tuple, int] = {}
+            for key, value in raw.items():
+                if not isinstance(key, str):
+                    continue
+                parts = key.split('_')
+                if len(parts) != 2 or not all(part.isdigit() for part in parts):
+                    continue
+                try:
+                    count = int(value)
+                except (TypeError, ValueError):
+                    continue
+                pair_history[(int(parts[0]), int(parts[1]))] = max(0, count)
+            self._pair_history[guild_id] = pair_history
 
         if guild_id not in self._spectator_counts:
             counts, last = store.get_spectator_history(guild_id)
@@ -134,6 +193,19 @@ class SplitService:
         if guild_id not in self._role_history:
             stored = store.get_role_history(guild_id)
             self._role_history[guild_id] = stored if stored else {}
+
+    def _build_split_context(self, result: SplitResult, mode: SplitMode, cfg) -> dict:
+        return {
+            'version': 1,
+            'mode_code': mode.mode_raw,
+            'avoid_count': int(getattr(cfg, 'avoid_count', 0)),
+            'spectators': [p.user_id for p in result.spectators],
+            'role_assignments': {
+                str(mem.user_id): mem.role
+                for team in result.teams
+                for mem in team.members
+            },
+        }
 
     # =======================================================
     # 外部用API（/split run）
@@ -152,14 +224,133 @@ class SplitService:
         self._ensure_history_cache(guild_id)
 
         cfg = get_store().get_split_config(guild_id)
-        result = self.split_custom(guild_id, players, mode, cfg, team_count)
+        result = self.preview_split(guild_id, players, mode, cfg, team_count)
 
         team_uids = [[mem.user_id for mem in team.members] for team in result.teams]
+        store.set_last_match(
+            guild_id,
+            team_uids,
+            split_context=self._build_split_context(result, mode, cfg),
+        )
+        return result
+
+    def commit_split_result(
+        self,
+        guild_id: int,
+        result: SplitResult,
+        mode: SplitMode,
+        cfg,
+    ) -> None:
+        teams = [[mem.user_id for mem in team.members] for team in result.teams]
+        role_assignments = {
+            mem.user_id: mem.role
+            for team in result.teams
+            for mem in team.members
+        }
+        self.commit_teams(
+            guild_id,
+            teams,
+            spectators=[p.user_id for p in result.spectators],
+            mode=mode,
+            cfg=cfg,
+            avoid_count=int(getattr(cfg, 'avoid_count', 0)),
+            role_assignments=role_assignments,
+        )
+
+    def commit_teams_with_stored_context(
+        self,
+        guild_id: int,
+        teams: List[List[int]],
+    ) -> bool:
+        context = get_stats_store().get_split_context(guild_id, teams)
+        return self.commit_teams_from_context(guild_id, teams, context)
+
+    def commit_teams_from_context(
+        self,
+        guild_id: int,
+        teams: List[List[int]],
+        context: Optional[dict],
+    ) -> bool:
+        if not context:
+            return False
+        if context.get('history_committed') is True:
+            return True
+
+        mode = None
+        mode_code = context.get('mode_code')
+        if isinstance(mode_code, str):
+            try:
+                mode = SplitMode(mode_code)
+            except ValueError:
+                mode = None
+
+        try:
+            avoid_count = int(context.get('avoid_count', 0))
+        except (TypeError, ValueError):
+            avoid_count = 0
+
+        raw_spectators = context.get('spectators', [])
+        spectators = _ordered_positive_uids(raw_spectators)
+
+        raw_roles = context.get('role_assignments', {})
+        role_assignments: Dict[int, str] = {}
+        if isinstance(raw_roles, dict):
+            for raw_uid, role in raw_roles.items():
+                uid = _positive_uid(raw_uid)
+                role_name = str(role)
+                if uid is not None and role_name in ROLE_KEYS:
+                    role_assignments[uid] = role_name
+
+        if not self.commit_teams(
+            guild_id,
+            teams,
+            spectators=spectators,
+            mode=mode,
+            avoid_count=avoid_count,
+            role_assignments=role_assignments,
+        ):
+            return False
+        committed_context = dict(context)
+        committed_context['avoid_count'] = avoid_count
+        committed_context['spectators'] = spectators
+        committed_context['role_assignments'] = {
+            str(uid): role for uid, role in role_assignments.items()
+        }
+        committed_context['history_committed'] = True
+        get_stats_store().set_split_context(guild_id, teams, committed_context)
+        return True
+
+    def commit_teams(
+        self,
+        guild_id: int,
+        teams: List[List[int]],
+        spectators: Optional[List[int]] = None,
+        mode: Optional[SplitMode] = None,
+        cfg=None,
+        avoid_count: Optional[int] = None,
+        role_assignments: Optional[Dict[int, str]] = None,
+    ) -> bool:
+        self._ensure_history_cache(guild_id)
+        store = get_stats_store()
+
+        team_uids: List[List[int]] = []
+        seen_members: set[int] = set()
+        for team in teams:
+            cleaned_team: List[int] = []
+            for uid in _ordered_positive_uids(team):
+                if uid in seen_members:
+                    continue
+                cleaned_team.append(uid)
+                seen_members.add(uid)
+            if cleaned_team:
+                team_uids.append(cleaned_team)
+        if len(team_uids) < 2:
+            return False
+
         self._prev_teams[guild_id] = {
             uid: tidx for tidx, uids in enumerate(team_uids) for uid in uids
         }
 
-        # ペア履歴を更新
         pair_hist = self._pair_history.setdefault(guild_id, {})
         for uids in team_uids:
             for i, uid1 in enumerate(uids):
@@ -167,24 +358,43 @@ class SplitService:
                     key = (min(uid1, uid2), max(uid1, uid2))
                     pair_hist[key] = pair_hist.get(key, 0) + 1
 
-        # 観戦履歴を更新
+        spectator_ids = _ordered_positive_uids(list(spectators or []))
         spec_counts = self._spectator_counts.setdefault(guild_id, {})
-        for p in result.spectators:
-            spec_counts[p.user_id] = spec_counts.get(p.user_id, 0) + 1
-        self._last_spectators[guild_id] = {p.user_id for p in result.spectators}
+        for uid in spectator_ids:
+            spec_counts[uid] = spec_counts.get(uid, 0) + 1
+        self._last_spectators[guild_id] = set(spectator_ids)
 
-        store.set_last_match(guild_id, team_uids)
-        store.set_prev_match(guild_id, team_uids)
-        store.set_pair_history(guild_id, {f"{k[0]}_{k[1]}": v for k, v in pair_hist.items()})
-        store.set_spectator_history(
-            guild_id, spec_counts, list(self._last_spectators[guild_id])
+        effective_avoid_count = avoid_count
+        if effective_avoid_count is None and cfg is not None:
+            effective_avoid_count = int(getattr(cfg, 'avoid_count', 0))
+        if effective_avoid_count is None:
+            effective_avoid_count = 0
+
+        role_history_to_save: Optional[Dict[int, List[str]]] = None
+        if (
+            mode is not None
+            and mode.use_avoid
+            and effective_avoid_count > 0
+            and role_assignments
+        ):
+            guild_hist = self._role_history.setdefault(guild_id, {})
+            for uid, role in role_assignments.items():
+                hist = guild_hist.setdefault(uid, [])
+                hist.append(role)
+                if len(hist) > effective_avoid_count:
+                    del hist[0 : len(hist) - effective_avoid_count]
+            role_history_to_save = guild_hist
+
+        store.set_split_history(
+            guild_id,
+            team_uids,
+            {f"{k[0]}_{k[1]}": v for k, v in pair_hist.items()},
+            spec_counts,
+            list(self._last_spectators[guild_id]),
+            role_history=role_history_to_save,
         )
-
-        # ロール履歴もディスクに永続化
-        if guild_id in self._role_history:
-            store.set_role_history(guild_id, self._role_history[guild_id])
-
-        return result
+        store.mark_split_history_committed(guild_id, team_uids)
+        return True
 
     def preview_split(
         self,
@@ -196,6 +406,10 @@ class SplitService:
         preview_spectator_counts: Optional[Dict[int, int]] = None,
         preview_last_spectators: Optional[set[int]] = None,
     ) -> SplitResult:
+        if team_count < 2:
+            raise ValueError('team_count must be at least 2')
+        if len(players) < team_count:
+            raise ValueError('not enough players for requested team count')
         self._ensure_history_cache(guild_id)
         preview_role_history = {
             uid: list(hist)
@@ -233,6 +447,206 @@ class SplitService:
         dry_run: bool = False,
     ) -> SplitResult:
         return self._split_players(guild_id, players, mode, cfg, team_count, dry_run=dry_run)
+
+    def _player_balance_weight(
+        self,
+        player: Player,
+        use_stats: bool,
+        stats_records: dict,
+    ) -> float:
+        if use_stats:
+            return _stats_weight(stats_records.get(player.user_id, {}))
+        return float(_rank_weight(player.rank_name))
+
+    def _candidate_pair_score(
+        self,
+        player: Player,
+        team: List[Player],
+        pair_hist: Dict[tuple, int],
+    ) -> int:
+        return sum(
+            pair_hist.get((min(player.user_id, pm.user_id), max(player.user_id, pm.user_id)), 0)
+            for pm in team
+        )
+
+    def _assignment_pair_score(
+        self,
+        teams: List[List[Player]],
+        pair_hist: Dict[tuple, int],
+    ) -> int:
+        total = 0
+        for team in teams:
+            for idx, player in enumerate(team):
+                for other in team[idx + 1:]:
+                    key = (min(player.user_id, other.user_id), max(player.user_id, other.user_id))
+                    total += pair_hist.get(key, 0)
+        return total
+
+    def _assign_players_greedy(
+        self,
+        players: List[Player],
+        target_sizes: List[int],
+        pair_hist: Dict[tuple, int],
+        sep_pairs: FrozenSet[tuple],
+        balance_active: bool,
+        use_stats: bool,
+        stats_records: dict,
+    ) -> tuple[List[List[Player]], List[float]]:
+        team_count = len(target_sizes)
+        teams_simple: List[List[Player]] = [[] for _ in range(team_count)]
+        weights: List[float] = [0.0] * team_count
+
+        for p in players:
+            candidates = [
+                i for i in range(team_count)
+                if len(teams_simple[i]) < target_sizes[i]
+            ]
+
+            scored = []
+            for i in candidates:
+                sep_violation = sum(
+                    1 for pm in teams_simple[i]
+                    if (min(p.user_id, pm.user_id), max(p.user_id, pm.user_id)) in sep_pairs
+                )
+                pair_score = self._candidate_pair_score(p, teams_simple[i], pair_hist)
+                scored.append((sep_violation, weights[i], pair_score, len(teams_simple[i]), i))
+
+            min_sep = min(s for s, *_ in scored)
+            if min_sep > 0:
+                idx = random.choice(candidates)
+            else:
+                after_sep = [(w, ps, sz, i) for s, w, ps, sz, i in scored if s == 0]
+                if balance_active:
+                    min_weight = min(w for w, *_ in after_sep)
+                    after_weight = [(ps, sz, i) for w, ps, sz, i in after_sep if w == min_weight]
+                    min_pair = min(ps for ps, *_ in after_weight)
+                    after_pair = [(sz, i) for ps, sz, i in after_weight if ps == min_pair]
+                else:
+                    min_pair = min(ps for _, ps, *_ in after_sep)
+                    after_pair_w = [(w, sz, i) for w, ps, sz, i in after_sep if ps == min_pair]
+                    min_weight = min(w for w, *_ in after_pair_w)
+                    after_pair = [(sz, i) for w, sz, i in after_pair_w if w == min_weight]
+                min_size = min(sz for sz, _ in after_pair)
+                best_indices = [i for sz, i in after_pair if sz == min_size]
+                idx = random.choice(best_indices)
+
+            teams_simple[idx].append(p)
+            weights[idx] += self._player_balance_weight(p, use_stats, stats_records)
+
+        return teams_simple, weights
+
+    def _assign_players_exact_separate(
+        self,
+        players: List[Player],
+        target_sizes: List[int],
+        pair_hist: Dict[tuple, int],
+        sep_pairs: FrozenSet[tuple],
+        balance_active: bool,
+        use_stats: bool,
+        stats_records: dict,
+    ) -> Optional[List[List[Player]]]:
+        if not sep_pairs:
+            return None
+
+        sep_map: Dict[int, set[int]] = {}
+        for uid1, uid2 in sep_pairs:
+            sep_map.setdefault(uid1, set()).add(uid2)
+            sep_map.setdefault(uid2, set()).add(uid1)
+
+        ordered = list(players)
+        random.shuffle(ordered)
+        ordered.sort(
+            key=lambda p: (
+                len(sep_map.get(p.user_id, set())),
+                self._player_balance_weight(p, use_stats, stats_records),
+            ),
+            reverse=True,
+        )
+
+        teams: List[List[Player]] = [[] for _ in target_sizes]
+        weights = [0.0] * len(target_sizes)
+        best: Optional[List[List[Player]]] = None
+        best_score: Optional[tuple[float, int, int]] = None
+        visited = 0
+        aborted = False
+
+        def impossible_to_fill(pos: int) -> bool:
+            remaining = len(ordered) - pos
+            return any(
+                len(teams[idx]) > target_sizes[idx]
+                or len(teams[idx]) + remaining < target_sizes[idx]
+                for idx in range(len(target_sizes))
+            )
+
+        def final_score(candidate: List[List[Player]]) -> tuple[float, int, int]:
+            final_weights = [
+                sum(self._player_balance_weight(p, use_stats, stats_records) for p in team)
+                for team in candidate
+            ]
+            spread = max(final_weights) - min(final_weights) if final_weights else 0.0
+            pair_score = self._assignment_pair_score(candidate, pair_hist)
+            size_spread = max(len(team) for team in candidate) - min(len(team) for team in candidate)
+            if balance_active:
+                return (spread, pair_score, size_spread)
+            return (float(pair_score), int(spread), size_spread)
+
+        def dfs(pos: int) -> None:
+            nonlocal best, best_score, visited, aborted
+            if aborted:
+                return
+            visited += 1
+            if visited > _EXACT_SEPARATE_NODE_LIMIT:
+                aborted = True
+                best = None
+                return
+            if impossible_to_fill(pos):
+                return
+            if pos >= len(ordered):
+                if any(len(teams[idx]) != target_sizes[idx] for idx in range(len(target_sizes))):
+                    return
+                candidate = [list(team) for team in teams]
+                score = final_score(candidate)
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best = candidate
+                return
+
+            player = ordered[pos]
+            blocked = sep_map.get(player.user_id, set())
+            candidates = [
+                idx
+                for idx in range(len(target_sizes))
+                if len(teams[idx]) < target_sizes[idx]
+                and all(member.user_id not in blocked for member in teams[idx])
+            ]
+            random.shuffle(candidates)
+            if balance_active:
+                candidates.sort(
+                    key=lambda idx: (
+                        weights[idx],
+                        self._candidate_pair_score(player, teams[idx], pair_hist),
+                        len(teams[idx]),
+                    )
+                )
+            else:
+                candidates.sort(
+                    key=lambda idx: (
+                        self._candidate_pair_score(player, teams[idx], pair_hist),
+                        weights[idx],
+                        len(teams[idx]),
+                    )
+                )
+
+            player_weight = self._player_balance_weight(player, use_stats, stats_records)
+            for idx in candidates:
+                teams[idx].append(player)
+                weights[idx] += player_weight
+                dfs(pos + 1)
+                weights[idx] -= player_weight
+                teams[idx].pop()
+
+        dfs(0)
+        return None if aborted else best
 
     # =======================================================
     # 内部メイン
@@ -305,9 +719,6 @@ class SplitService:
             random.shuffle(base)
 
         # チーム分配
-        teams_simple: List[List[Player]] = [[] for _ in range(team_count)]
-        weights = [0] * team_count
-
         # まず「各チームの目標人数」を決める（できるだけ均等）
         total = len(base)
         base_size = total // team_count          # だいたいの人数
@@ -333,52 +744,28 @@ class SplitService:
         # バランスモード有効時は重み差を優先、無効時はペア累積を優先
         balance_active = mode.use_rank_balance or use_stats
 
-        for p in base:
-            candidates = [
-                i for i in range(team_count)
-                if len(teams_simple[i]) < target_sizes[i]
-            ]
-
-            scored = []
-            for i in candidates:
-                sep_violation = sum(
-                    1 for pm in teams_simple[i]
-                    if (min(p.user_id, pm.user_id), max(p.user_id, pm.user_id)) in sep_pairs
-                )
-                pair_score = sum(
-                    pair_hist.get((min(p.user_id, pm.user_id), max(p.user_id, pm.user_id)), 0)
-                    for pm in teams_simple[i]
-                )
-                scored.append((sep_violation, weights[i], pair_score, len(teams_simple[i]), i))
-
-            min_sep = min(s for s, *_ in scored)
-            if min_sep > 0:
-                # 全チームで分離違反が避けられない → 毎回違うペアになるようランダム割当
-                idx = random.choice(candidates)
-            else:
-                after_sep = [(w, ps, sz, i) for s, w, ps, sz, i in scored if s == 0]
-                if balance_active:
-                    # バランス優先: 重み差 → ペア累積 → 人数
-                    min_weight = min(w for w, *_ in after_sep)
-                    after_weight = [(ps, sz, i) for w, ps, sz, i in after_sep if w == min_weight]
-                    min_pair = min(ps for ps, *_ in after_weight)
-                    after_pair = [(sz, i) for ps, sz, i in after_weight if ps == min_pair]
-                else:
-                    # ランダム分け: ペア累積 → 重み差 → 人数
-                    min_pair = min(ps for _, ps, *_ in after_sep)
-                    after_pair_w = [(w, sz, i) for w, ps, sz, i in after_sep if ps == min_pair]
-                    min_weight = min(w for w, *_ in after_pair_w)
-                    after_pair = [(sz, i) for w, sz, i in after_pair_w if w == min_weight]
-                min_size = min(sz for sz, _ in after_pair)
-                best_indices = [i for sz, i in after_pair if sz == min_size]
-                idx = random.choice(best_indices)
-
-            teams_simple[idx].append(p)
-            if use_stats:
-                weights[idx] += _stats_weight(stats_records.get(p.user_id, {}))
-            else:
-                weights[idx] += _rank_weight(p.rank_name)
-
+        teams_simple = (
+            self._assign_players_exact_separate(
+                base,
+                target_sizes,
+                pair_hist,
+                sep_pairs,
+                balance_active,
+                use_stats,
+                stats_records,
+            )
+            if sep_pairs else None
+        )
+        if teams_simple is None:
+            teams_simple, _ = self._assign_players_greedy(
+                base,
+                target_sizes,
+                pair_hist,
+                sep_pairs,
+                balance_active,
+                use_stats,
+                stats_records,
+            )
         # 2) ロール割当
         final_roles: Dict[int, str] = {}
         if preview_role_history is not None:
@@ -582,16 +969,22 @@ class SplitService:
     # ポケモン割当
     # =======================================================
     def _load_pokemon_list(self) -> Dict[str, List[str]]:
-        path = Path("data/pokemon_list.yaml")
+        path = data_path('pokemon_list.yaml')
         try:
-            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            text = path.read_text(encoding="utf-8")
         except FileNotFoundError:
-            return {}
+            try:
+                text = resources.files('unitechan').joinpath('data/pokemon_list.yaml').read_text(
+                    encoding="utf-8"
+                )
+            except FileNotFoundError:
+                return {}
+        data = yaml.safe_load(text) or {}
         return {key: [str(v) for v in data.get(key, [])] for key in ROLE_KEYS}
 
     def get_all_pokemon_names(self) -> List[str]:
         """全ポケモン名のリストを返す（autocomplete用）"""
-        return [name for names in self._pokemon_by_role.values() for name in names]
+        return list(self._all_pokemon_names)
 
     def _assign_pokemon(
         self,

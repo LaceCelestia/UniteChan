@@ -60,11 +60,14 @@ class GuiPanelState:
     manual_spectators: list[int] = field(default_factory=list)
     recorded_winner: int | None = None
     awaiting_result: bool = False
+    result_recording: bool = False
     auto_result: SplitResult | None = None
     auto_result_mode_code: str | None = None
+    auto_result_context: dict | None = None
     preview_spectator_counts: dict[int, int] = field(default_factory=dict)
     preview_last_spectators: set[int] = field(default_factory=set)
     preview_spectator_seeded: bool = False
+    history_committed: bool = False
 
     def _remove_from_assignments(self, user_id: int) -> None:
         self.team_a = [uid for uid in self.team_a if uid != user_id]
@@ -75,10 +78,15 @@ class GuiPanelState:
     def _clear_result(self) -> None:
         self.recorded_winner = None
         self.awaiting_result = False
+        self.result_recording = False
 
     def _clear_auto_result(self) -> None:
         self.auto_result = None
         self.auto_result_mode_code = None
+        self.auto_result_context = None
+
+    def _clear_history_commit(self) -> None:
+        self.history_committed = False
 
     def unassigned(self) -> list[int]:
         assigned = set(self.team_a) | set(self.team_b) | set(self.spectators)
@@ -94,6 +102,18 @@ class GuiPanelState:
         spectator_ids = set(self.manual_spectators)
         return [uid for uid in self.pool if uid not in spectator_ids]
 
+    def has_result_flow(self) -> bool:
+        return self.awaiting_result or self.result_recording or self.recorded_winner is not None
+
+    def has_assignments(self) -> bool:
+        return bool(self.team_a or self.team_b or self.spectators or self.manual_spectators)
+
+    def can_sync_pool_from_lobby(self) -> bool:
+        return not self.has_result_flow() and not self.has_assignments()
+
+    def can_update_config_code(self) -> bool:
+        return not self.has_result_flow() and self.auto_result is None
+
     def assign_team(self, user_id: int, team_idx: int) -> bool:
         current_target = self.team_a if team_idx == 0 else self.team_b
         if user_id in current_target:
@@ -108,6 +128,7 @@ class GuiPanelState:
         else:
             self.team_b.append(user_id)
         self._clear_auto_result()
+        self._clear_history_commit()
         self._clear_result()
         return True
 
@@ -120,6 +141,7 @@ class GuiPanelState:
         self.spectators.append(user_id)
         self.manual_spectators.append(user_id)
         self._clear_auto_result()
+        self._clear_history_commit()
         self._clear_result()
         return True
 
@@ -132,6 +154,7 @@ class GuiPanelState:
         self.preview_last_spectators.discard(user_id)
         self.preview_spectator_seeded = False
         self._clear_auto_result()
+        self._clear_history_commit()
         self._clear_result()
         return True
 
@@ -149,6 +172,7 @@ class GuiPanelState:
         self.preview_last_spectators &= allowed
         self.preview_spectator_seeded = False
         self._clear_auto_result()
+        self._clear_history_commit()
         self._clear_result()
 
     def reset_assignments(self) -> bool:
@@ -165,6 +189,7 @@ class GuiPanelState:
         self.spectators = []
         self.manual_spectators = []
         self._clear_auto_result()
+        self._clear_history_commit()
         self._clear_result()
         return True
 
@@ -176,6 +201,7 @@ class GuiPanelState:
         *,
         split_result: SplitResult | None = None,
         mode_code: str | None = None,
+        split_context: dict | None = None,
     ) -> None:
         self.team_a = _ordered_unique(team_a)
         self.team_b = _ordered_unique(team_b)
@@ -184,15 +210,19 @@ class GuiPanelState:
         self.pool = _ordered_unique(self.pool + self.team_a + self.team_b + self.spectators)
         self.auto_result = split_result
         self.auto_result_mode_code = mode_code if split_result is not None else None
+        self.auto_result_context = dict(split_context) if split_context is not None else None
+        self._clear_history_commit()
         self._clear_result()
 
     def start_match(self) -> None:
         self.recorded_winner = None
         self.awaiting_result = True
+        self.result_recording = False
 
     def finish_match(self, winning_idx: int) -> None:
         self.recorded_winner = winning_idx
         self.awaiting_result = False
+        self.result_recording = False
 
     def recorded_sides(self) -> tuple[list[int], list[int]] | None:
         if self.recorded_winner is None:
@@ -321,7 +351,7 @@ class GuiMode(commands.Cog):
         )
 
     async def _build_embed(self, guild: discord.Guild, state: GuiPanelState) -> discord.Embed:
-        if state.use_config_code:
+        if state.use_config_code and state.can_update_config_code():
             state.mode_code = get_store().get_split_code(guild.id)
         cfg = get_store().get_split_config(guild.id)
         mode = SplitMode(state.mode_code)
@@ -499,6 +529,8 @@ class GuiMode(commands.Cog):
 
         manual_spectators = list(state.manual_spectators)
         auto_spectators = [player.user_id for player in result.spectators]
+        split_context = self.service._build_split_context(result, mode, cfg)
+        split_context['spectators'] = _ordered_unique(manual_spectators + auto_spectators)
         for uid in auto_spectators:
             state.preview_spectator_counts[uid] = state.preview_spectator_counts.get(uid, 0) + 1
         state.preview_last_spectators = set(auto_spectators)
@@ -508,13 +540,41 @@ class GuiMode(commands.Cog):
             manual_spectators + auto_spectators,
             split_result=result,
             mode_code=state.mode_code,
+            split_context=split_context,
         )
 
-    async def _record_result(self, guild_id: int, teams: list[list[int]], winning_idx: int) -> None:
+    async def _record_result(self, guild_id: int, teams: list[list[int]], winning_idx: int) -> bool:
         store = get_stats_store()
-        if store.get_last_match(guild_id) != teams:
-            store.set_last_match(guild_id, teams)
-        store.record_result(guild_id, winning_idx)
+        winners, _ = store.record_result_for_teams(guild_id, teams, winning_idx)
+        if winners and store.get_last_match(guild_id) == teams:
+            store.clear_last_match(guild_id)
+        return bool(winners)
+
+    def _commit_panel_history(self, guild: discord.Guild, state: GuiPanelState) -> None:
+        if state.history_committed:
+            return
+
+        auto_result = state.auto_result
+        if auto_result is not None:
+            if not self.service.commit_teams_from_context(
+                guild.id,
+                state.current_teams(),
+                state.auto_result_context,
+            ):
+                cfg = get_store().get_split_config(guild.id)
+                self.service.commit_split_result(
+                    guild.id,
+                    auto_result,
+                    SplitMode(state.auto_result_mode_code or state.mode_code),
+                    cfg,
+                )
+        else:
+            self.service.commit_teams(
+                guild.id,
+                state.current_teams(),
+                spectators=list(state.spectators),
+            )
+        state.history_committed = True
 
     def _register_view(self, guild_id: int, view: GuiModeView) -> None:
         self._active_views.setdefault(guild_id, set()).add(view)
@@ -532,11 +592,12 @@ class GuiMode(commands.Cog):
         guild: discord.Guild,
         *,
         sync_pool: bool = False,
+        force: bool = False,
     ) -> int:
         refreshed = 0
         for view in list(self._active_views.get(guild.id, set())):
             try:
-                if await view.refresh_panel(guild, sync_pool=sync_pool):
+                if await view.refresh_panel(guild, sync_pool=sync_pool, force=force):
                     refreshed += 1
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 self._unregister_view(guild.id, view)
@@ -597,21 +658,28 @@ class GuiModeView(discord.ui.View):
     def bind_message(self, message: discord.Message) -> None:
         self.message = message
 
-    async def refresh_panel(self, guild: discord.Guild, *, sync_pool: bool = False) -> bool:
+    async def refresh_panel(
+        self,
+        guild: discord.Guild,
+        *,
+        sync_pool: bool = False,
+        force: bool = False,
+    ) -> bool:
         if self.message is None:
             return False
 
-        changed = False
+        changed = force
         if sync_pool:
-            lobby, _ = self.cog.lobby_store.snapshot(guild.id)
-            new_pool = self.cog._sort_user_ids(guild, list(lobby))
-            if new_pool != self.state.pool:
-                self.state.replace_pool(new_pool)
-                changed = True
+            if self.state.can_sync_pool_from_lobby():
+                lobby, _ = self.cog.lobby_store.snapshot(guild.id)
+                new_pool = self.cog._sort_user_ids(guild, list(lobby))
+                if new_pool != self.state.pool:
+                    self.state.replace_pool(new_pool)
+                    changed = True
 
         if self.state.use_config_code:
             new_code = get_store().get_split_code(guild.id)
-            if new_code != self.state.mode_code:
+            if new_code != self.state.mode_code and self.state.can_update_config_code():
                 self.state.mode_code = new_code
                 changed = True
 
@@ -627,6 +695,8 @@ class GuiModeView(discord.ui.View):
 
     async def remove_user(self, guild: discord.Guild, user_id: int) -> bool:
         if self.message is None:
+            return False
+        if self.state.has_result_flow():
             return False
         if not self.state.remove_user(user_id):
             return False
@@ -648,6 +718,7 @@ class GuiModeView(discord.ui.View):
         ready = self.state.is_ready()
         result_done = self.state.recorded_winner is not None
         locked = self.state.awaiting_result
+        recording = self.state.result_recording
 
         self._button('guimode_team_a').disabled = locked
         self._button('guimode_team_b').disabled = locked
@@ -657,8 +728,8 @@ class GuiModeView(discord.ui.View):
         self._button('guimode_auto').disabled = locked
         self._button('guimode_reset').disabled = locked
         self._button('guimode_move').disabled = locked or not ready
-        self._button('guimode_win_a').disabled = (not locked) or result_done
-        self._button('guimode_win_b').disabled = (not locked) or result_done
+        self._button('guimode_win_a').disabled = (not locked) or result_done or recording
+        self._button('guimode_win_b').disabled = (not locked) or result_done or recording
         self._button('guimode_undo_result').disabled = locked or (not result_done)
 
     async def _ensure_not_locked(self, interaction: discord.Interaction) -> bool:
@@ -765,12 +836,13 @@ class GuiModeView(discord.ui.View):
         if interaction.guild is None:
             await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
             return
+        await interaction.response.defer()
         try:
             self.cog._auto_split(interaction.guild, self.state)
         except ValueError as exc:
-            await interaction.response.send_message(str(exc), ephemeral=True)
+            await interaction.followup.send(str(exc), ephemeral=True)
             return
-        await self._update_message(interaction)
+        await self._edit_panel_message(interaction)
 
     @discord.ui.button(label='リセット', emoji='🔄', style=discord.ButtonStyle.secondary, custom_id='guimode_reset', row=1)
     async def reset_panel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
@@ -791,18 +863,30 @@ class GuiModeView(discord.ui.View):
         if interaction.guild is None:
             await interaction.response.send_message('サーバー内で使ってね。', ephemeral=True)
             return
+        if self.state.awaiting_result:
+            await interaction.response.send_message(
+                'VC移動後は勝敗入力が終わるまで操作できません。',
+                ephemeral=True,
+            )
+            return
         if not self.state.is_ready():
             await interaction.response.send_message('未割当メンバーがいるため、まだVC移動できません。', ephemeral=True)
             return
 
+        self.state.start_match()
         try:
             await interaction.response.defer()
             moved = await self.cog._move_members(interaction.guild, self.state)
         except ValueError as exc:
+            self.state._clear_result()
+            await self._edit_panel_message(interaction)
             await interaction.followup.send(str(exc), ephemeral=True)
             return
+        except Exception:
+            self.state._clear_result()
+            await self._edit_panel_message(interaction)
+            raise
 
-        self.state.start_match()
         await self._edit_panel_message(interaction)
         if isinstance(interaction.channel, (discord.TextChannel, discord.Thread)):
             await self.cog._send_transient_notice(
@@ -861,6 +945,9 @@ class GuiModeView(discord.ui.View):
         if self.state.recorded_winner is not None:
             await interaction.response.send_message('この試合結果はすでに記録済みです。', ephemeral=True)
             return
+        if self.state.result_recording:
+            await interaction.response.send_message('勝敗記録を処理中です。', ephemeral=True)
+            return
         if not self.state.awaiting_result:
             await interaction.response.send_message('先に VC移動 を押して試合開始状態にしてください。', ephemeral=True)
             return
@@ -868,10 +955,29 @@ class GuiModeView(discord.ui.View):
             await interaction.response.send_message('未割当メンバーがいるため、まだ勝敗を記録できません。', ephemeral=True)
             return
 
-        await interaction.response.defer()
-        await self.cog._record_result(interaction.guild.id, self.state.current_teams(), winning_idx)
-        self.state.finish_match(winning_idx)
-        await self._edit_panel_message(interaction)
+        self.state.result_recording = True
+        try:
+            await interaction.response.defer()
+            self.cog._commit_panel_history(interaction.guild, self.state)
+            recorded = await self.cog._record_result(
+                interaction.guild.id,
+                self.state.current_teams(),
+                winning_idx,
+            )
+            if not recorded:
+                self.state.result_recording = False
+                await self._edit_panel_message(interaction)
+                await interaction.followup.send(
+                    '記録できる試合が見つかりませんでした。最新のチーム分けを確認してください。',
+                    ephemeral=True,
+                )
+                return
+            self.state.finish_match(winning_idx)
+            await self._edit_panel_message(interaction)
+        except Exception:
+            self.state.result_recording = False
+            await self._edit_panel_message(interaction)
+            raise
 
         team_label = 'Team A' if winning_idx == 0 else 'Team B'
         if isinstance(interaction.channel, (discord.TextChannel, discord.Thread)):

@@ -26,10 +26,11 @@ class BanCommands(commands.Cog):
     async def _all_pokemon_ac(
         self, interaction: discord.Interaction, current: str
     ) -> List[app_commands.Choice[str]]:
+        needle = current.casefold()
         names = self._service.get_all_pokemon_names()
         return [
             app_commands.Choice(name=n, value=n)
-            for n in names if current in n
+            for n in names if needle in n.casefold()
         ][:25]
 
     async def _banned_pokemon_ac(
@@ -37,10 +38,11 @@ class BanCommands(commands.Cog):
     ) -> List[app_commands.Choice[str]]:
         if interaction.guild is None:
             return []
+        needle = current.casefold()
         banned = get_store().get_banned_pokemon(interaction.guild.id)
         return [
             app_commands.Choice(name=n, value=n)
-            for n in sorted(banned) if current in n
+            for n in sorted(banned) if needle in n.casefold()
         ][:25]
 
     # ---- コマンド ----

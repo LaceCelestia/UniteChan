@@ -63,6 +63,8 @@ class PendingSplitMessage:
     guild_id: int
     teams: list[list[int]]
     mode_code: str | None = None
+    result: SplitResult | None = None
+    history_committed: bool = False
     allow_controls: bool = False
 
 
@@ -248,7 +250,7 @@ class TeamSplit(commands.Cog):
             embed = self._build_embed_from_result(result, mode, cfg, names)
 
         if interaction.response.is_done():
-            return await interaction.followup.send(embed=embed)
+            return await interaction.followup.send(embed=embed, wait=True)
         else:
             await interaction.response.send_message(embed=embed)
             return await interaction.original_response()
@@ -271,13 +273,13 @@ class TeamSplit(commands.Cog):
             await interaction.response.send_message(str(e), ephemeral=True)
             return
 
+        await interaction.response.defer()
         try:
             result = self.service.split(guild_id, m)
         except ValueError as e:
-            await interaction.response.send_message(str(e), ephemeral=True)
+            await interaction.followup.send(str(e), ephemeral=True)
             return
 
-        await interaction.response.defer()
         msg = await self._display(interaction, result, m, cfg, resolve_names=True)
         teams = [[mem.user_id for mem in team.members] for team in result.teams]
         for emoji in _REACTION_EMOJIS:
@@ -286,6 +288,7 @@ class TeamSplit(commands.Cog):
             guild_id=guild_id,
             teams=teams,
             mode_code=m.mode_raw,
+            result=result,
             allow_controls=True,
         )
 
@@ -336,9 +339,19 @@ class TeamSplit(commands.Cog):
 
         # 🇦/🇧 後から記録（/split prev）
         if emoji in ('🇦', '🇧') and payload.message_id in self._pending_direct_votes:
-            guild_id, teams, allow_rematch = self._pending_direct_votes.pop(payload.message_id)
+            guild_id, teams, allow_rematch = self._pending_direct_votes[payload.message_id]
+            guild = self.bot.get_guild(guild_id)
+            member = await self._resolve_reaction_member(payload, guild)
+            if not self._is_admin_member(member):
+                return
+            consumed = self._pending_direct_votes.pop(payload.message_id, None)
+            if consumed is None:
+                return
+            guild_id, teams, allow_rematch = consumed
             winning_idx = 0 if emoji == '🇦' else 1
             store = get_stats_store()
+            if not self.service.commit_teams_with_stored_context(guild_id, teams):
+                self.service.commit_teams(guild_id, teams)
             winners, losers = store.record_result_for_teams(guild_id, teams, winning_idx)
             if not winners:
                 return
@@ -368,10 +381,18 @@ class TeamSplit(commands.Cog):
             return
 
         if emoji == '🇦' or emoji == '🇧':
+            member = await self._resolve_reaction_member(payload, guild)
+            if not self._is_admin_member(member):
+                return
             winning_idx = 0 if emoji == '🇦' else 1
-            self._pending_votes.pop(payload.message_id)
+            consumed = self._pending_votes.pop(payload.message_id, None)
+            if consumed is None:
+                return
+            pending = consumed
+            guild_id = pending.guild_id
             store = get_stats_store()
             teams = [list(team) for team in pending.teams]
+            self._commit_pending_history(guild_id, pending)
             winners, losers = store.record_result_for_teams(guild_id, teams, winning_idx)
             if not winners:
                 return
@@ -389,22 +410,28 @@ class TeamSplit(commands.Cog):
         elif emoji == '🎙️':
             if not pending.allow_controls:
                 return
-            member = payload.member or guild.get_member(payload.user_id)
+            member = await self._resolve_reaction_member(payload, guild)
             if not self._is_admin_member(member):
+                return
+            if self._pending_votes.get(payload.message_id) is not pending:
                 return
             if payload.message_id in self._moving:
                 return
             self._moving.add(payload.message_id)
             try:
-                await self._reaction_move(payload, guild, pending.teams)
+                moved = await self._reaction_move(payload, guild, pending.teams)
+                if moved:
+                    pending.allow_controls = False
             finally:
                 self._moving.discard(payload.message_id)
 
         elif emoji == '🔄':
             if not pending.allow_controls or pending.mode_code is None:
                 return
-            member = payload.member or guild.get_member(payload.user_id)
+            member = await self._resolve_reaction_member(payload, guild)
             if not self._is_admin_member(member):
+                return
+            if self._pending_votes.get(payload.message_id) is not pending:
                 return
             await self._reaction_reroll(payload, guild, pending)
 
@@ -429,11 +456,74 @@ class TeamSplit(commands.Cog):
     ) -> None:
         await channel.send(content, delete_after=_TRANSIENT_NOTICE_SECONDS)
 
+    async def _resolve_reaction_member(
+        self,
+        payload: discord.RawReactionActionEvent,
+        guild: Optional[discord.Guild],
+    ) -> Optional[discord.Member]:
+        if guild is None:
+            return None
+        if isinstance(payload.member, discord.Member):
+            return payload.member
+        member = guild.get_member(payload.user_id)
+        if member is not None:
+            return member
+        try:
+            return await guild.fetch_member(payload.user_id)
+        except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+            return None
+
     def _is_admin_member(self, member: Optional[discord.Member]) -> bool:
         if member is None:
             return False
         p = member.guild_permissions
         return bool(p.administrator or p.manage_guild or p.manage_roles)
+
+    def _commit_pending_history(self, guild_id: int, pending: PendingSplitMessage) -> None:
+        if pending.history_committed:
+            return
+        if self.service.commit_teams_with_stored_context(guild_id, pending.teams):
+            pending.history_committed = True
+            return
+        if pending.result is not None and pending.mode_code is not None:
+            cfg = get_store().get_split_config(guild_id)
+            self.service.commit_split_result(
+                guild_id,
+                pending.result,
+                SplitMode(pending.mode_code),
+                cfg,
+            )
+        else:
+            if not self.service.commit_teams_with_stored_context(guild_id, pending.teams):
+                self.service.commit_teams(guild_id, pending.teams)
+        pending.history_committed = True
+
+    def _lock_controls_for_teams(self, guild_id: int, teams: list[list[int]]) -> None:
+        normalized = [list(team) for team in teams]
+        for pending in self._pending_votes.values():
+            if pending.guild_id != guild_id:
+                continue
+            if [list(team) for team in pending.teams] == normalized:
+                pending.allow_controls = False
+
+    def commit_history_for_teams(
+        self,
+        guild_id: int,
+        teams: list[list[int]],
+        *,
+        consume: bool = True,
+    ) -> bool:
+        normalized = [list(team) for team in teams]
+        for message_id, pending in list(self._pending_votes.items()):
+            if pending.guild_id != guild_id:
+                continue
+            if [list(team) for team in pending.teams] != normalized:
+                continue
+            self._commit_pending_history(guild_id, pending)
+            if consume:
+                self._pending_votes.pop(message_id, None)
+            return True
+        return False
 
     async def _reaction_rematch(
         self,
@@ -475,11 +565,11 @@ class TeamSplit(commands.Cog):
         payload: discord.RawReactionActionEvent,
         guild: discord.Guild,
         teams: list[list[int]],
-    ) -> None:
+    ) -> bool:
         """🎤 リアクション: チーム分け結果に従ってVCを移動する。"""
         channel = self.bot.get_channel(payload.channel_id)
         if not isinstance(channel, (discord.TextChannel, discord.Thread)):
-            return
+            return False
 
         guild_id = guild.id
 
@@ -491,7 +581,7 @@ class TeamSplit(commands.Cog):
             await channel.send(
                 'VCが設定されていません。`/config vc` で Team A / Team B のVCを設定してください。'
             )
-            return
+            return False
 
         vc_channels = [channel_a, channel_b]
 
@@ -515,6 +605,7 @@ class TeamSplit(commands.Cog):
             await msg.clear_reaction('🎙️')
         except (discord.Forbidden, discord.NotFound, discord.HTTPException):
             pass
+        return True
 
     async def _reaction_reroll(
         self,
@@ -527,12 +618,27 @@ class TeamSplit(commands.Cog):
         cfg = get_store().get_split_config(guild_id)
         mode = SplitMode(pending.mode_code)
 
+        lobby, ranks = self.lobby_store.snapshot(guild_id)
+        if len(lobby) < 2:
+            return
+        players = [
+            Player(uid, self._resolve_name_guild(guild, uid), ranks.get(uid, "ビギナー"))
+            for uid in lobby
+        ]
+
         try:
-            result = self.service.split(guild_id, mode)
+            result = self.service.preview_split(guild_id, players, mode, cfg)
         except ValueError:
             return
 
         pending.teams = [[mem.user_id for mem in team.members] for team in result.teams]
+        pending.result = result
+        pending.history_committed = False
+        get_stats_store().set_last_match(
+            guild_id,
+            pending.teams,
+            split_context=self.service._build_split_context(result, mode, cfg),
+        )
         embed = self._build_embed_guild(guild, result, mode, cfg)
 
         channel = self.bot.get_channel(payload.channel_id)
@@ -555,6 +661,9 @@ class TeamSplit(commands.Cog):
     async def split_prev(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
             await interaction.response.send_message("サーバー内で使ってね。", ephemeral=True)
+            return
+        if not isinstance(interaction.user, discord.Member) or not self._is_admin_member(interaction.user):
+            await interaction.response.send_message("このコマンドは管理者のみ使用できます。", ephemeral=True)
             return
 
         guild_id = interaction.guild.id
@@ -579,7 +688,7 @@ class TeamSplit(commands.Cog):
             embed.add_field(name="🟥 Team B", value=label_b or "(なし)", inline=True)
             embed.set_footer(text="🇦 / 🇧 で勝利チームを記録")
 
-            msg = await interaction.followup.send(embed=embed)
+            msg = await interaction.followup.send(embed=embed, wait=True)
             await msg.add_reaction("🇦")
             await msg.add_reaction("🇧")
             self._pending_direct_votes[msg.id] = (guild_id, teams, i == 0)
@@ -632,6 +741,7 @@ class TeamSplit(commands.Cog):
             )
             return
 
+        self._lock_controls_for_teams(interaction.guild.id, last)
         await interaction.response.defer()
 
         channels = [channel_a, channel_b]

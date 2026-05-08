@@ -11,6 +11,9 @@ from unitechan.app.cogs._utils import is_admin
 class SeparateCommands(commands.Cog):
     """チーム分け分離ペア管理 Cog"""
 
+    def __init__(self, bot: commands.Bot) -> None:
+        self.bot = bot
+
     separate = app_commands.Group(name='separate', description='必ず別チームにするペアを管理します')
 
     @separate.command(name='add', description='指定した2人を必ず別チームにします（管理者専用）')

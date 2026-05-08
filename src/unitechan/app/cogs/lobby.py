@@ -27,11 +27,17 @@ class Lobby(commands.Cog):
             return False
         return True
 
-    async def _refresh_gui_panels(self, guild: discord.Guild, *, sync_pool: bool = True) -> int:
+    async def _refresh_gui_panels(
+        self,
+        guild: discord.Guild,
+        *,
+        sync_pool: bool = True,
+        force: bool = False,
+    ) -> int:
         gui_cog = self.bot.get_cog('GuiMode')
         if gui_cog is None or not hasattr(gui_cog, 'refresh_guild_panels'):
             return 0
-        return await gui_cog.refresh_guild_panels(guild, sync_pool=sync_pool)
+        return await gui_cog.refresh_guild_panels(guild, sync_pool=sync_pool, force=force)
 
     async def _remove_user_from_gui_panels(self, guild: discord.Guild, user_id: int) -> int:
         gui_cog = self.bot.get_cog('GuiMode')
@@ -256,7 +262,7 @@ class Lobby(commands.Cog):
             msg = f'**{target.display_name}** の表示名を **{name}** に変更しました。' if member else f'表示名を **{name}** に変更しました。'
         else:
             msg = f'**{target.display_name}** の表示名をリセットしました。' if member else '表示名をリセットしました。'
-        refreshed = await self._refresh_gui_panels(interaction.guild, sync_pool=False)
+        refreshed = await self._refresh_gui_panels(interaction.guild, sync_pool=False, force=True)
         if refreshed > 0:
             msg += f'\nGUIパネル {refreshed} 件にも反映しました。'
         await interaction.response.send_message(msg, ephemeral=True)
